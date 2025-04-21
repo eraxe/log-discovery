@@ -5,7 +5,7 @@ Module for discovering OpenLiteSpeed logs.
 import os
 import re
 import glob
-import threading  # Added for thread-safe operations
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import the LogSource base class
@@ -183,28 +183,36 @@ class OpenLiteSpeedLogSource(LogSource):
         if domain_match:
             vhost_domain = domain_match.group(1)
 
+        # Extract variables from vhost config for path resolution
+        vh_variables = self._extract_vhost_variables(vhost_config, vhost_content, vhost_name)
+
         # Get vhost error log
         vhost_error_match = re.search(r'errorlog\s+(.+?)[\s\n]', vhost_content)
         if vhost_error_match:
             error_log_path = vhost_error_match.group(1)
+
+            # Resolve variables in the path
+            resolved_error_path = self._resolve_vhost_path(error_log_path, vh_variables)
+
             # Handle relative paths
-            if not os.path.isabs(error_log_path):
-                error_log_path = os.path.normpath(os.path.join(os.path.dirname(vhost_config), error_log_path))
+            if not os.path.isabs(resolved_error_path):
+                resolved_error_path = os.path.normpath(os.path.join(os.path.dirname(vhost_config), resolved_error_path))
 
             self.add_log(
                 f"vhost_{vhost_name}_error",
-                error_log_path,
+                resolved_error_path,
                 labels={
                     "level": "error",
                     "service": "webserver",
                     "vhost": vhost_name,
-                    "domain": vhost_domain
+                    "domain": vhost_domain,
+                    "original_path": error_log_path  # Store original path for reference
                 }
             )
             logs_found += 1
 
             # Also look for rotated versions of this log
-            logs_found += self._find_rotated_logs(error_log_path, f"vhost_{vhost_name}_error", {
+            logs_found += self._find_rotated_logs(resolved_error_path, f"vhost_{vhost_name}_error", {
                 "level": "error",
                 "service": "webserver",
                 "vhost": vhost_name,
@@ -216,24 +224,29 @@ class OpenLiteSpeedLogSource(LogSource):
         vhost_access_match = re.search(r'accesslog\s+(.+?)[\s\n]', vhost_content)
         if vhost_access_match:
             access_log_path = vhost_access_match.group(1)
+
+            # Resolve variables in the path
+            resolved_access_path = self._resolve_vhost_path(access_log_path, vh_variables)
+
             # Handle relative paths
-            if not os.path.isabs(access_log_path):
-                access_log_path = os.path.normpath(os.path.join(os.path.dirname(vhost_config), access_log_path))
+            if not os.path.isabs(resolved_access_path):
+                resolved_access_path = os.path.normpath(os.path.join(os.path.dirname(vhost_config), resolved_access_path))
 
             self.add_log(
                 f"vhost_{vhost_name}_access",
-                access_log_path,
+                resolved_access_path,
                 labels={
                     "level": "access",
                     "service": "webserver",
                     "vhost": vhost_name,
-                    "domain": vhost_domain
+                    "domain": vhost_domain,
+                    "original_path": access_log_path  # Store original path for reference
                 }
             )
             logs_found += 1
 
             # Also look for rotated versions of this log
-            logs_found += self._find_rotated_logs(access_log_path, f"vhost_{vhost_name}_access", {
+            logs_found += self._find_rotated_logs(resolved_access_path, f"vhost_{vhost_name}_access", {
                 "level": "access",
                 "service": "webserver",
                 "vhost": vhost_name,
@@ -242,6 +255,76 @@ class OpenLiteSpeedLogSource(LogSource):
             })
 
         return logs_found
+
+    def _extract_vhost_variables(self, vhost_config, vhost_content, vhost_name):
+        """Extract and resolve variables used in a vhost configuration.
+
+        Args:
+            vhost_config: Path to the vhost config file
+            vhost_content: Content of the vhost config file
+            vhost_name: Name of the vhost
+
+        Returns:
+            dict: Dictionary of variable names to their values
+        """
+        variables = {
+            '$VH_NAME': vhost_name,
+            '$SERVER_ROOT': '/usr/local/lsws'  # Default value
+        }
+
+        # Look for server root in main config
+        for main_config in ["/usr/local/lsws/conf/httpd_config.conf", "/etc/openlitespeed/httpd_config.conf"]:
+            if os.path.exists(main_config):
+                main_content = self._load_file_content(main_config)
+                if main_content:
+                    server_root_match = re.search(r'serverRoot\s+(.+?)[\s\n]', main_content)
+                    if server_root_match:
+                        variables['$SERVER_ROOT'] = server_root_match.group(1)
+                        break
+
+        # Extract vhRoot from vhost config
+        vhost_root_match = re.search(r'vhRoot\s+(.+?)[\s\n]', vhost_content)
+        if vhost_root_match:
+            variables['$VH_ROOT'] = vhost_root_match.group(1)
+            # Resolve $SERVER_ROOT in vhRoot if present
+            if '$SERVER_ROOT' in variables['$VH_ROOT']:
+                variables['$VH_ROOT'] = variables['$VH_ROOT'].replace('$SERVER_ROOT', variables['$SERVER_ROOT'])
+        else:
+            # Default VH_ROOT if not specified
+            variables['$VH_ROOT'] = os.path.join(variables['$SERVER_ROOT'], 'vhosts', vhost_name)
+
+        # Extract custom defined variables
+        custom_var_matches = re.finditer(r'context\s+define\s+(.+?)[\s\n]', vhost_content)
+        for match in custom_var_matches:
+            var_def = match.group(1)
+            var_parts = var_def.split()
+            if len(var_parts) >= 2:
+                var_name = var_parts[0]
+                var_value = var_parts[1]
+                variables[f'${var_name}'] = var_value
+
+        return variables
+
+    def _resolve_vhost_path(self, path, variables):
+        """Resolve variables in a path.
+
+        Args:
+            path: Path potentially containing variables
+            variables: Dictionary of variable names to their values
+
+        Returns:
+            str: Resolved path
+        """
+        resolved_path = path
+
+        # Sort keys by length (longest first) to avoid partial replacements
+        sorted_vars = sorted(variables.keys(), key=len, reverse=True)
+
+        for var in sorted_vars:
+            if var in resolved_path:
+                resolved_path = resolved_path.replace(var, variables[var])
+
+        return resolved_path
 
 # Required function to return the log source class
 def get_log_source():

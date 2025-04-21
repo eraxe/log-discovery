@@ -1,5 +1,5 @@
 """
-Module for discovering WordPress logs.
+Module for discovering WordPress logs with improved name handling.
 """
 
 import os
@@ -7,6 +7,7 @@ import re
 import glob
 import subprocess
 import threading  # Added for thread-safe operations
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import the LogSource base class
@@ -271,7 +272,8 @@ class WordPressLogSource(LogSource):
                     "service": "wordpress",
                     "site": site_name,
                     "domain": domain if domain else "",
-                    "debug_display": str(debug_display).lower()
+                    "debug_display": str(debug_display).lower(),
+                    "log_type": "debug"
                 },
                 exists=exists or parent_exists  # Consider potential future log files
             )
@@ -284,21 +286,23 @@ class WordPressLogSource(LogSource):
                     "service": "wordpress",
                     "site": site_name,
                     "domain": domain if domain else "",
-                    "rotated": "true"
+                    "rotated": "true",
+                    "log_type": "debug"
                 })
         elif debug_enabled:
             # Debug is enabled but no log path - check PHP error log
             php_error_log = self._get_php_error_log_from_wp(site_path, config_content)
             if php_error_log:
                 self.add_log(
-                    f"wp_php_error_{site_name}",
+                    f"wp_error_{site_name}",
                     php_error_log,
                     labels={
                         "level": "error",
                         "service": "wordpress",
                         "site": site_name,
                         "domain": domain if domain else "",
-                        "source": "php_error_log"
+                        "source": "php_error_log",
+                        "log_type": "error"
                     }
                 )
                 logs_found += 1
@@ -355,27 +359,47 @@ class WordPressLogSource(LogSource):
                 # Get relative path to give more context
                 rel_path = os.path.relpath(log_path, site_path) if site_path in log_path else log_path
 
+                # Create a shorter name
+                location = os.path.dirname(rel_path).replace('/', '_').replace('-', '_')
+                if location:
+                    # Hash longer location names
+                    if len(location) > 20:
+                        location_hash = hashlib.md5(location.encode()).hexdigest()[:8]
+                        location = f"{location[:8]}_{location_hash}"
+                    short_name = f"wp_{log_name}_{location}"
+                else:
+                    short_name = f"wp_{log_name}"
+
+                # Append site name
+                short_name = f"{short_name}_{site_name}"
+                # Ensure uniqueness with hash if needed
+                if len(short_name) > 40:
+                    name_hash = hashlib.md5(short_name.encode()).hexdigest()[:8]
+                    short_name = f"{short_name[:30]}_{name_hash}"
+
                 self.add_log(
-                    f"wp_{log_name}_{site_name}",
+                    short_name,
                     log_path,
                     labels={
                         "level": level,
                         "service": "wordpress",
                         "site": site_name,
                         "domain": domain if domain else "",
-                        "path": rel_path
+                        "path": rel_path,
+                        "log_type": log_name
                     }
                 )
                 logs_found += 1
 
                 # Look for rotated versions
-                logs_found += self._find_rotated_logs(log_path, f"wp_{log_name}_{site_name}", {
+                logs_found += self._find_rotated_logs(log_path, short_name, {
                     "level": level,
                     "service": "wordpress",
                     "site": site_name,
                     "domain": domain if domain else "",
                     "rotated": "true",
-                    "path": rel_path
+                    "path": rel_path,
+                    "log_type": log_name
                 })
 
         # Look for WP-specific error logs that might be created by themes or plugins
@@ -395,8 +419,15 @@ class WordPressLogSource(LogSource):
                             component = os.path.basename(log_path)  # e.g., wc-logs
                             log_base = os.path.basename(log_file).replace('.log', '')
 
+                            # Create a more concise name
+                            short_name = f"wp_{component}_{site_name}"
+                            # Add hash of log_base if it's long
+                            if len(log_base) > 10:
+                                base_hash = hashlib.md5(log_base.encode()).hexdigest()[:6]
+                                short_name = f"{short_name}_{base_hash}"
+
                             self.add_log(
-                                f"wp_{component}_{log_base}_{site_name}",
+                                short_name,
                                 log_file,
                                 labels={
                                     "level": "debug",
@@ -404,22 +435,28 @@ class WordPressLogSource(LogSource):
                                     "site": site_name,
                                     "domain": domain if domain else "",
                                     "component": component,
-                                    "path": os.path.relpath(log_file, site_path)
+                                    "path": os.path.relpath(log_file, site_path),
+                                    "log_type": component,
+                                    "original_name": log_base
                                 }
                             )
                             logs_found += 1
                 elif not self.discoverer.is_log_already_added(log_path):
                     component = os.path.basename(log_path).replace('.log', '')
 
+                    # Create a concise name
+                    short_name = f"wp_{component}_{site_name}"
+
                     self.add_log(
-                        f"wp_{component}_{site_name}",
+                        short_name,
                         log_path,
                         labels={
                             "level": "debug",
                             "service": "wordpress",
                             "site": site_name,
                             "domain": domain if domain else "",
-                            "path": os.path.relpath(log_path, site_path)
+                            "path": os.path.relpath(log_path, site_path),
+                            "log_type": component
                         }
                     )
                     logs_found += 1
@@ -556,10 +593,15 @@ class WordPressLogSource(LogSource):
                         # Find all log files in the directory
                         for log_file in glob.glob(f"{full_path}/*.log"):
                             if not self.discoverer.is_log_already_added(log_file):
-                                log_base = os.path.basename(log_file).replace('.log', '')
+                                # Create a concise name
+                                name = f"wp_{plugin}_{site_name}"
+                                # Add hash if needed
+                                if len(name) > 40:
+                                    name_hash = hashlib.md5(name.encode()).hexdigest()[:8]
+                                    name = f"{name[:30]}_{name_hash}"
 
                                 self.add_log(
-                                    f"wp_{plugin}_{log_base}_{site_name}",
+                                    name,
                                     log_file,
                                     labels={
                                         "level": "info",
@@ -567,15 +609,23 @@ class WordPressLogSource(LogSource):
                                         "plugin": plugin,
                                         "site": site_name,
                                         "domain": domain if domain else "",
-                                        "path": os.path.relpath(log_file, site_path)
+                                        "path": os.path.relpath(log_file, site_path),
+                                        "log_type": plugin
                                     }
                                 )
                                 logs_found += 1
                     else:
                         # Single log file
                         if not self.discoverer.is_log_already_added(full_path):
+                            # Create a concise name
+                            name = f"wp_{plugin}_{site_name}"
+                            # Add hash if needed
+                            if len(name) > 40:
+                                name_hash = hashlib.md5(name.encode()).hexdigest()[:8]
+                                name = f"{name[:30]}_{name_hash}"
+
                             self.add_log(
-                                f"wp_{plugin}_log_{site_name}",
+                                name,
                                 full_path,
                                 labels={
                                     "level": "info",
@@ -583,20 +633,22 @@ class WordPressLogSource(LogSource):
                                     "plugin": plugin,
                                     "site": site_name,
                                     "domain": domain if domain else "",
-                                    "path": rel_path
+                                    "path": rel_path,
+                                    "log_type": plugin
                                 }
                             )
                             logs_found += 1
 
                             # Look for rotated versions
-                            logs_found += self._find_rotated_logs(full_path, f"wp_{plugin}_log_{site_name}", {
+                            logs_found += self._find_rotated_logs(full_path, name, {
                                 "level": "info",
                                 "service": "wordpress",
                                 "plugin": plugin,
                                 "site": site_name,
                                 "domain": domain if domain else "",
                                 "rotated": "true",
-                                "path": rel_path
+                                "path": rel_path,
+                                "log_type": plugin
                             })
 
         return logs_found
@@ -662,7 +714,15 @@ class WordPressLogSource(LogSource):
             str: Sanitized name
         """
         # Remove special characters and replace with underscores
-        return re.sub(r'[^a-zA-Z0-9_]', '_', name)
+        name = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+
+        # Ensure name isn't too long
+        if len(name) > 20:
+            # Hash longer names
+            name_hash = hashlib.md5(name.encode()).hexdigest()[:8]
+            name = f"{name[:10]}_{name_hash}"
+
+        return name
 
     def _extract_domain_from_path(self, path):
         """Try to extract a domain name from a path.

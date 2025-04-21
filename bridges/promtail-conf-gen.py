@@ -228,37 +228,29 @@ def get_tree_node_html(path: str, name: str, is_dir: bool, indent: int, has_chil
     """Get HTML representation of a tree node."""
     prefix = "    " * indent
 
-    # Escape any special characters in the name
-    safe_name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
+    # Use simple text formatting instead of complex HTML
     if is_dir:
         if path in state.expanded_nodes:
-            toggle_icon = "[-]"
-            toggle_class = "tree.expanded"
+            toggle = "[-]" if has_children else "   "
         else:
-            toggle_icon = "[+]"
-            toggle_class = "tree"
+            toggle = "[+]" if has_children else "   "
 
-        if has_children:
-            toggle = f'<{toggle_class}>{toggle_icon}</{toggle_class}> '
-        else:
-            toggle = '    '
+        checkbox = "[x]" if path in state.selected_logs else "[ ]"
+        display_name = f"{name}/"
 
         if path in state.selected_logs:
-            checkbox = '<class="tree.toggle">[x]</class>'
+            return HTML(
+                f"{prefix}<tree.toggle>{toggle}</tree.toggle> <tree.toggle>{checkbox}</tree.toggle> <tree.selected>{display_name}</tree.selected>")
         else:
-            checkbox = '<class="tree.toggle.off">[ ]</class>'
-
-        node_class = "tree.selected" if path in state.selected_logs else "tree"
-        return HTML(f"{prefix}{toggle}{checkbox} <{node_class}>{safe_name}{'&#47;'}</{node_class}>")
+            return HTML(
+                f"{prefix}<tree.toggle>{toggle}</tree.toggle> <tree.toggle.off>{checkbox}</tree.toggle.off> <tree>{display_name}</tree>")
     else:
-        if path in state.selected_logs:
-            checkbox = '<class="tree.toggle">[x]</class>'
-        else:
-            checkbox = '<class="tree.toggle.off">[ ]</class>'
+        checkbox = "[x]" if path in state.selected_logs else "[ ]"
 
-        node_class = "tree.selected" if path in state.selected_logs else "tree"
-        return HTML(f"{prefix}    {checkbox} <{node_class}>{safe_name}</{node_class}>")
+        if path in state.selected_logs:
+            return HTML(f"{prefix}    <tree.toggle>{checkbox}</tree.toggle> <tree.selected>{name}</tree.selected>")
+        else:
+            return HTML(f"{prefix}    <tree.toggle.off>{checkbox}</tree.toggle.off> <tree>{name}</tree>")
 
 
 def render_directory_tree() -> List[HTML]:

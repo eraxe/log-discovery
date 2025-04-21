@@ -33,6 +33,7 @@ try:
     from prompt_toolkit.layout.dimension import D
     from prompt_toolkit.layout.margins import ScrollbarMargin
     from prompt_toolkit.filters import Condition
+    from prompt_toolkit.layout.containers import FloatContainer, Float as Float_
 except ImportError:
     print("This script requires the 'prompt_toolkit' library.")
     print("Please install it with: pip install prompt-toolkit")
@@ -236,22 +237,22 @@ def get_tree_node_html(path: str, name: str, is_dir: bool, indent: int, has_chil
             toggle_class = "tree"
 
         if has_children:
-            toggle = f'<{toggle_class}>{toggle_icon}</tree.expanded> '
+            toggle = f'<{toggle_class}>{toggle_icon}</{toggle_class}> '
         else:
             toggle = '    '
 
         if path in state.selected_logs:
-            checkbox = '[class="tree.toggle"][x]'
+            checkbox = '<class="tree.toggle">[x]</class>'
         else:
-            checkbox = '[class="tree.toggle.off"][ ]'
+            checkbox = '<class="tree.toggle.off">[ ]</class>'
 
         node_class = "tree.selected" if path in state.selected_logs else "tree"
-        return HTML(f"{prefix}{toggle}{checkbox} <{node_class}>{name}/</{node_class}>")
+        return HTML(f"{prefix}{toggle}{checkbox} <{node_class}>{name}{'/'}</{node_class}>")
     else:
         if path in state.selected_logs:
-            checkbox = '[class="tree.toggle"][x]'
+            checkbox = '<class="tree.toggle">[x]</class>'
         else:
-            checkbox = '[class="tree.toggle.off"][ ]'
+            checkbox = '<class="tree.toggle.off">[ ]</class>'
 
         node_class = "tree.selected" if path in state.selected_logs else "tree"
         return HTML(f"{prefix}    {checkbox} <{node_class}>{name}</{node_class}>")
@@ -316,9 +317,9 @@ def render_type_view() -> List[HTML]:
         if visible:
             # Checkbox for type
             if log_type in state.selected_types:
-                checkbox = '[class="tree.toggle"][x]'
+                checkbox = '<class="tree.toggle">[x]</class>'
             else:
-                checkbox = '[class="tree.toggle.off"][ ]'
+                checkbox = '<class="tree.toggle.off">[ ]</class>'
 
             node_class = "tree.selected" if log_type in state.selected_types else "tree.expanded"
             count = len(logs_by_type[log_type])
@@ -334,9 +335,9 @@ def render_type_view() -> List[HTML]:
                         continue
 
                     if path in state.selected_logs:
-                        checkbox = '[class="tree.toggle"][x]'
+                        checkbox = '<class="tree.toggle">[x]</class>'
                     else:
-                        checkbox = '[class="tree.toggle.off"][ ]'
+                        checkbox = '<class="tree.toggle.off">[ ]</class>'
 
                     node_class = "tree.selected" if path in state.selected_logs else "tree"
                     lines.append(HTML(f"    {checkbox} <{node_class}>{name}</{node_class}> ({path})"))
@@ -364,9 +365,9 @@ def render_service_view() -> List[HTML]:
         if visible:
             # Checkbox for service
             if service in state.selected_services:
-                checkbox = '[class="tree.toggle"][x]'
+                checkbox = '<class="tree.toggle">[x]</class>'
             else:
-                checkbox = '[class="tree.toggle.off"][ ]'
+                checkbox = '<class="tree.toggle.off">[ ]</class>'
 
             node_class = "tree.selected" if service in state.selected_services else "tree.expanded"
             count = len(logs_by_service[service])
@@ -382,9 +383,9 @@ def render_service_view() -> List[HTML]:
                         continue
 
                     if path in state.selected_logs:
-                        checkbox = '[class="tree.toggle"][x]'
+                        checkbox = '<class="tree.toggle">[x]</class>'
                     else:
-                        checkbox = '[class="tree.toggle.off"][ ]'
+                        checkbox = '<class="tree.toggle.off">[ ]</class>'
 
                     node_class = "tree.selected" if path in state.selected_logs else "tree"
                     lines.append(HTML(f"    {checkbox} <{node_class}>{name}</{node_class}> ({path})"))

@@ -1082,7 +1082,7 @@ def main():
     # Create and run the application
     global app
     app = Application(
-        layout=get_layout,
+        layout=Layout(get_layout()),  # Call the function to get a container
         key_bindings=kb,
         mouse_support=True,
         full_screen=True,

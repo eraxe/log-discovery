@@ -1,0 +1,70 @@
+# loki.service
+# Place in /etc/systemd/system/loki.service
+
+[Unit]
+Description=Loki log aggregation service
+After=network.target
+Requires=podman.service
+ConditionPathExists=/etc/logbuddy/loki-config.yaml
+
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=10s
+TimeoutStartSec=120
+TimeoutStopSec=120
+
+ExecStartPre=-/usr/bin/podman stop loki
+ExecStartPre=-/usr/bin/podman rm loki
+
+ExecStart=/usr/bin/podman run --rm --name loki \
+  -v /etc/logbuddy/loki-config.yaml:/etc/loki/loki-config.yaml:ro,Z \
+  -v /var/lib/logbuddy/loki:/var/loki:Z \
+  -p 127.0.0.1:3100:3100 \
+  -e LOKI_AUTH_ENABLED=true \
+  -e LOKI_ADMIN_USERNAME=admin \
+  -e LOKI_ADMIN_PASSWORD=${LOKI_PASSWORD} \
+  docker.io/grafana/loki:2.9.2 -config.file=/etc/loki/loki-config.yaml
+
+ExecStop=/usr/bin/podman stop loki
+
+[Install]
+WantedBy=multi-user.target
+
+# promtail.service
+# Place in /etc/systemd/system/promtail.service
+
+[Unit]
+Description=Promtail log collector service
+After=network.target loki.service
+Requires=podman.service
+ConditionPathExists=/etc/logbuddy/promtail-config.yaml
+
+[Service]
+Type=simple
+User=root
+Restart=always
+RestartSec=10s
+TimeoutStartSec=120
+TimeoutStopSec=120
+
+ExecStartPre=-/usr/bin/podman stop promtail
+ExecStartPre=-/usr/bin/podman rm promtail
+
+ExecStart=/usr/bin/podman run --rm --name promtail \
+  -v /etc/logbuddy/promtail-config.yaml:/etc/promtail/config.yml:ro,Z \
+  -v /var/lib/logbuddy/positions.yaml:/etc/promtail/positions.yaml:Z \
+  -v /var/log:/var/log:ro \
+  -v /var/www:/var/www:ro \
+  -v /usr/local/lsws/logs:/usr/local/lsws/logs:ro \
+  docker.io/grafana/promtail:2.9.2 -config.file=/etc/promtail/config.yml
+
+ExecStop=/usr/bin/podman stop promtail
+
+[Install]
+WantedBy=multi-user.target
+
+# Environment file template for Loki credentials
+# Place in /etc/logbuddy/loki.env
+LOKI_PASSWORD=your_secure_password_here

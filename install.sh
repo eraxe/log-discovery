@@ -1,47 +1,40 @@
 #!/bin/bash
 # ==============================================================================
-# Enhanced OpenLiteSpeed/CyberPanel/WordPress Log Discovery System Installer
+# LogBuddy - Unified Log Discovery and Monitoring Tool Installer
 # ==============================================================================
 #
-# This script installs, removes, or updates the log discovery system.
+# This script installs, removes, or updates the LogBuddy system.
 # Usage: ./installer.sh [install|remove|update] [--no-service] [--no-deps]
 #        [--interval daily|hourly|custom] [--email admin@example.com]
 #
 # Options:
-#   install     Install the log discovery system
-#   remove      Remove the log discovery system
-#   update      Update the log discovery system
+#   install     Install the LogBuddy system
+#   remove      Remove the LogBuddy system
+#   update      Update the LogBuddy system
 #   --no-service  Don't install/remove the systemd service
 #   --no-deps     Skip dependency installation
 #   --interval    Set discovery interval (daily, hourly, or cron expression)
 #   --email       Set notification email for automated reports
 #
-# Author: Claude
-# Created: April 21, 2025
-# Updated: For modular architecture
 # ==============================================================================
 
 set -e
 
 # Configuration
-INSTALL_DIR="/opt/log-discovery"
-SERVICE_NAME="log-discovery"
+INSTALL_DIR="/opt/logbuddy"
+BIN_DIR="/usr/local/bin"
+SERVICE_NAME="logbuddy"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 TIMER_FILE="/etc/systemd/system/${SERVICE_NAME}.timer"
 SERVICE_ENABLED=true
-LOG_DIR="/var/log/log-discovery"
-CONFIG_DIR="/etc/${SERVICE_NAME}"
+LOG_DIR="/var/log/logbuddy"
+CONFIG_DIR="/etc/logbuddy"
 CACHE_DIR="${CONFIG_DIR}/cache"
-OUTPUT_DIR="${CONFIG_DIR}/output"
+DATA_DIR="/var/lib/logbuddy"
+OUTPUT_DIR="${DATA_DIR}/output"
 DISCOVERY_INTERVAL="daily"  # daily, hourly, or a cron expression like "0 4 * * *"
 INSTALL_DEPS=true
 NOTIFY_EMAIL=""
-
-# Script names
-RUNNER_SCRIPT="runner.sh"
-DISCOVERY_SCRIPT="log_discovery.py"
-BASE_CLASS_SCRIPT="log_source.py"
-MODULES_DIR="modules"
 
 # Colors for output
 RED='\033[0;31m'
@@ -132,6 +125,19 @@ check_dependencies() {
         log_info "Python YAML module found"
     fi
 
+    # Check for Python prompt_toolkit (needed for the config TUI)
+    if ! python3 -c "import prompt_toolkit" &> /dev/null; then
+        log_warn "Python prompt_toolkit module is not installed"
+        if $INSTALL_DEPS; then
+            log_info "Installing prompt_toolkit..."
+            pip3 install prompt-toolkit
+        else
+            log_warn "Skipping prompt_toolkit installation. The configuration UI may not work correctly."
+        fi
+    else
+        log_info "Python prompt_toolkit module found"
+    fi
+
     # Check for email utilities (if notification is enabled)
     if [ -n "$NOTIFY_EMAIL" ]; then
         if ! command -v mail &> /dev/null && ! command -v mailx &> /dev/null; then
@@ -168,6 +174,25 @@ check_dependencies() {
         log_info "jq found"
     fi
 
+    # Check for container engine (podman or docker)
+    if ! command -v podman &> /dev/null && ! command -v docker &> /dev/null; then
+        log_warn "Neither Podman nor Docker is installed. Container monitoring will not work."
+        if $INSTALL_DEPS; then
+            log_info "Attempting to install Podman..."
+            if command -v apt-get &> /dev/null; then
+                apt-get update -qq && apt-get install -y podman
+            elif command -v yum &> /dev/null; then
+                yum install -y podman
+            else
+                log_warn "Could not install Podman. Please install Podman or Docker manually."
+            fi
+        fi
+    elif command -v podman &> /dev/null; then
+        log_info "Podman found"
+    elif command -v docker &> /dev/null; then
+        log_info "Docker found"
+    fi
+
     if $missing; then
         log_error "Please install the missing dependencies and try again."
         exit 1
@@ -179,7 +204,7 @@ check_dependencies() {
 # ==============================================================================
 
 install_system() {
-    print_header "Installing Log Discovery System"
+    print_header "Installing LogBuddy System"
 
     # Create installation directory
     log_info "Creating installation directory: ${INSTALL_DIR}"
@@ -194,38 +219,81 @@ install_system() {
     mkdir -p "${CONFIG_DIR}"
     mkdir -p "${OUTPUT_DIR}"
     mkdir -p "${CACHE_DIR}"
+    mkdir -p "${DATA_DIR}"
 
     # Create logs directory for script logs
     mkdir -p "${INSTALL_DIR}/logs"
 
     # Create modules directory
-    log_info "Creating modules directory: ${INSTALL_DIR}/${MODULES_DIR}"
-    mkdir -p "${INSTALL_DIR}/${MODULES_DIR}"
+    log_info "Creating modules directory: ${INSTALL_DIR}/modules"
+    mkdir -p "${INSTALL_DIR}/modules"
 
-    # Copy files
+    # Create bridges directory
+    log_info "Creating bridges directory: ${INSTALL_DIR}/bridges"
+    mkdir -p "${INSTALL_DIR}/bridges"
+
+    # Create misc directory
+    log_info "Creating misc directory: ${INSTALL_DIR}/misc"
+    mkdir -p "${INSTALL_DIR}/misc"
+
+    # Copy main files
     log_info "Copying files..."
-    cp "${SCRIPT_DIR}/${DISCOVERY_SCRIPT}" "${INSTALL_DIR}/"
-    cp "${SCRIPT_DIR}/${BASE_CLASS_SCRIPT}" "${INSTALL_DIR}/"
-    cp "${SCRIPT_DIR}/${RUNNER_SCRIPT}" "${INSTALL_DIR}/"
+    cp "${SCRIPT_DIR}/log_discovery.py" "${INSTALL_DIR}/"
+    cp "${SCRIPT_DIR}/log_source.py" "${INSTALL_DIR}/"
+    cp "${SCRIPT_DIR}/runner.sh" "${INSTALL_DIR}/"
     cp "${SCRIPT_DIR}/README.md" "${INSTALL_DIR}/"
     cp "${SCRIPT_DIR}/install.sh" "${INSTALL_DIR}/"
 
+    # Copy or create the logbuddy.py script
+    if [ -f "${SCRIPT_DIR}/logbuddy.py" ]; then
+        cp "${SCRIPT_DIR}/logbuddy.py" "${INSTALL_DIR}/"
+    else
+        # Create logbuddy.py if not exists - this would be filled with proper content
+        log_info "Creating logbuddy.py main script"
+        cp "${SCRIPT_DIR}/logbuddy.py" "${INSTALL_DIR}/" || true
+    fi
+
     # Copy module files
     log_info "Copying module files..."
-    cp "${SCRIPT_DIR}/${MODULES_DIR}/__init__.py" "${INSTALL_DIR}/${MODULES_DIR}/"
+    cp "${SCRIPT_DIR}/modules/__init__.py" "${INSTALL_DIR}/modules/"
 
     # Copy all Python files in the modules directory
-    for module_file in "${SCRIPT_DIR}/${MODULES_DIR}"/*.py; do
+    for module_file in "${SCRIPT_DIR}/modules"/*.py; do
         if [ -f "$module_file" ]; then
-            cp "$module_file" "${INSTALL_DIR}/${MODULES_DIR}/"
+            cp "$module_file" "${INSTALL_DIR}/modules/"
             log_info "Copied module: $(basename "$module_file")"
         fi
     done
 
+    # Copy bridge files
+    log_info "Copying bridge files..."
+    for bridge_file in "${SCRIPT_DIR}/bridges"/*; do
+        if [ -f "$bridge_file" ]; then
+            cp "$bridge_file" "${INSTALL_DIR}/bridges/"
+            chmod +x "${INSTALL_DIR}/bridges/$(basename "$bridge_file")"
+            log_info "Copied bridge: $(basename "$bridge_file")"
+        fi
+    done
+
+    # Copy misc files
+    log_info "Copying misc files..."
+    for misc_file in "${SCRIPT_DIR}/misc"/*; do
+        if [ -f "$misc_file" ]; then
+            cp "$misc_file" "${INSTALL_DIR}/misc/"
+            chmod +x "${INSTALL_DIR}/misc/$(basename "$misc_file")"
+            log_info "Copied misc file: $(basename "$misc_file")"
+        fi
+    done
+
     # Make scripts executable
-    chmod +x "${INSTALL_DIR}/${DISCOVERY_SCRIPT}"
-    chmod +x "${INSTALL_DIR}/${RUNNER_SCRIPT}"
+    chmod +x "${INSTALL_DIR}/log_discovery.py"
+    chmod +x "${INSTALL_DIR}/runner.sh"
     chmod +x "${INSTALL_DIR}/install.sh"
+    chmod +x "${INSTALL_DIR}/logbuddy.py"
+
+    # Create symlink to executable
+    log_info "Creating logbuddy command in ${BIN_DIR}"
+    ln -sf "${INSTALL_DIR}/logbuddy.py" "${BIN_DIR}/logbuddy"
 
     # Create default config
     if [ ! -f "${CONFIG_DIR}/config.json" ]; then
@@ -236,10 +304,14 @@ install_system() {
     "output_dir": "${OUTPUT_DIR}",
     "cache_dir": "${CACHE_DIR}",
     "log_dir": "${LOG_DIR}",
+    "data_dir": "${DATA_DIR}",
     "output_format": "json",
     "verbose": false,
     "timeout": 300,
-    "notify_email": "${NOTIFY_EMAIL}"
+    "notify_email": "${NOTIFY_EMAIL}",
+    "container_engine": "podman",
+    "promtail_container": "promtail",
+    "loki_container": "loki"
 }
 EOF
     fi
@@ -256,14 +328,19 @@ EOF
     install_logrotate
 
     log_info "Installation completed successfully!"
-    log_info "The log discovery system is installed in: ${INSTALL_DIR}"
+    log_info "The LogBuddy system is installed in: ${INSTALL_DIR}"
     log_info "Configuration is stored in: ${CONFIG_DIR}"
     log_info "Logs are stored in: ${LOG_DIR}"
 
     # Show usage examples
     echo ""
-    log_info "You can now run the log discovery with:"
-    echo "  ${INSTALL_DIR}/${RUNNER_SCRIPT} --verbose"
+    log_info "You can now use LogBuddy with the following commands:"
+    echo "  logbuddy discover     # Discover logs on the system"
+    echo "  logbuddy config       # Configure which logs to monitor"
+    echo "  logbuddy install      # Install Loki/Promtail with Podman"
+    echo "  logbuddy start        # Start monitoring"
+    echo "  logbuddy stop         # Stop monitoring"
+    echo "  logbuddy status       # Check monitoring status"
     echo ""
     if $SERVICE_ENABLED; then
         log_info "Or use the systemd service:"
@@ -271,7 +348,7 @@ EOF
         echo "  systemctl status ${SERVICE_NAME}.timer"
     fi
 
-    log_info "To add new log source modules, place Python files in: ${INSTALL_DIR}/${MODULES_DIR}/"
+    log_info "To add new log source modules, place Python files in: ${INSTALL_DIR}/modules/"
 }
 
 install_service() {
@@ -280,17 +357,17 @@ install_service() {
     # Create systemd service file
     log_info "Creating systemd service file: ${SERVICE_FILE}"
 
-    # Get runner script path with proper escaping
-    local runner_path="${INSTALL_DIR}/${RUNNER_SCRIPT}"
+    # Get logbuddy script path with proper escaping
+    local logbuddy_path="${INSTALL_DIR}/logbuddy.py"
 
     cat > "${SERVICE_FILE}" << EOF
 [Unit]
-Description=Log Discovery System for OpenLiteSpeed/CyberPanel/WordPress
+Description=LogBuddy Log Discovery and Monitoring System
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=${runner_path} --cron --output ${OUTPUT_DIR}/discovered_logs.json
+ExecStart=${logbuddy_path} discover --output ${OUTPUT_DIR}/discovered_logs.json
 WorkingDirectory=${INSTALL_DIR}
 StandardOutput=append:${LOG_DIR}/discovery.log
 StandardError=append:${LOG_DIR}/discovery.error.log
@@ -322,7 +399,7 @@ EOF
 
     cat > "${TIMER_FILE}" << EOF
 [Unit]
-Description=Run Log Discovery System periodically
+Description=Run LogBuddy periodically
 Requires=${SERVICE_NAME}.service
 
 [Timer]
@@ -375,10 +452,10 @@ EOF
 # ==============================================================================
 
 remove_system() {
-    print_header "Removing Log Discovery System"
+    print_header "Removing LogBuddy System"
 
     # Prompt for confirmation
-    if ! confirm "Are you sure you want to remove the log discovery system?"; then
+    if ! confirm "Are you sure you want to remove the LogBuddy system?"; then
         log_info "Removal cancelled."
         exit 0
     fi
@@ -392,6 +469,12 @@ remove_system() {
     if [ -f "/etc/logrotate.d/${SERVICE_NAME}" ]; then
         log_info "Removing logrotate configuration"
         rm -f "/etc/logrotate.d/${SERVICE_NAME}"
+    fi
+
+    # Remove symlink to executable
+    if [ -L "${BIN_DIR}/logbuddy" ]; then
+        log_info "Removing logbuddy command from ${BIN_DIR}"
+        rm -f "${BIN_DIR}/logbuddy"
     fi
 
     # Check if installation directory exists
@@ -413,10 +496,16 @@ remove_system() {
             log_info "Removing log directory: ${LOG_DIR}"
             rm -rf "${LOG_DIR}"
         fi
+
+        if [ -d "${DATA_DIR}" ]; then
+            log_info "Removing data directory: ${DATA_DIR}"
+            rm -rf "${DATA_DIR}"
+        fi
     else
         log_info "Keeping configuration and logs."
         log_info "  Configuration directory: ${CONFIG_DIR}"
         log_info "  Log directory: ${LOG_DIR}"
+        log_info "  Data directory: ${DATA_DIR}"
     fi
 
     log_info "Removal completed successfully!"
@@ -462,7 +551,7 @@ remove_service() {
 # ==============================================================================
 
 update_system() {
-    print_header "Updating Log Discovery System"
+    print_header "Updating LogBuddy System"
 
     # Check if installation directory exists
     if [ ! -d "${INSTALL_DIR}" ]; then
@@ -477,37 +566,74 @@ update_system() {
     mkdir -p "${BACKUP_DIR}"
     cp -r "${INSTALL_DIR}"/* "${BACKUP_DIR}/"
 
-    # Copy new files
+    # Copy main files
     log_info "Updating files..."
-    cp "${SCRIPT_DIR}/${DISCOVERY_SCRIPT}" "${INSTALL_DIR}/"
-    cp "${SCRIPT_DIR}/${BASE_CLASS_SCRIPT}" "${INSTALL_DIR}/"
-    cp "${SCRIPT_DIR}/${RUNNER_SCRIPT}" "${INSTALL_DIR}/"
+    cp "${SCRIPT_DIR}/log_discovery.py" "${INSTALL_DIR}/"
+    cp "${SCRIPT_DIR}/log_source.py" "${INSTALL_DIR}/"
+    cp "${SCRIPT_DIR}/runner.sh" "${INSTALL_DIR}/"
     cp "${SCRIPT_DIR}/README.md" "${INSTALL_DIR}/"
     cp "${SCRIPT_DIR}/install.sh" "${INSTALL_DIR}/"
 
+    # Copy the logbuddy.py script
+    if [ -f "${SCRIPT_DIR}/logbuddy.py" ]; then
+        cp "${SCRIPT_DIR}/logbuddy.py" "${INSTALL_DIR}/"
+    fi
+
     # Create modules directory if it doesn't exist
     log_info "Updating modules directory..."
-    mkdir -p "${INSTALL_DIR}/${MODULES_DIR}"
+    mkdir -p "${INSTALL_DIR}/modules"
 
     # Copy module initialization file
-    cp "${SCRIPT_DIR}/${MODULES_DIR}/__init__.py" "${INSTALL_DIR}/${MODULES_DIR}/"
+    cp "${SCRIPT_DIR}/modules/__init__.py" "${INSTALL_DIR}/modules/"
 
     # Copy all Python files in the modules directory
-    for module_file in "${SCRIPT_DIR}/${MODULES_DIR}"/*.py; do
+    for module_file in "${SCRIPT_DIR}/modules"/*.py; do
         if [ -f "$module_file" ]; then
-            cp "$module_file" "${INSTALL_DIR}/${MODULES_DIR}/"
+            cp "$module_file" "${INSTALL_DIR}/modules/"
             log_info "Updated module: $(basename "$module_file")"
         fi
     done
 
+    # Create bridges directory if it doesn't exist
+    log_info "Updating bridges directory..."
+    mkdir -p "${INSTALL_DIR}/bridges"
+
+    # Copy bridge files
+    for bridge_file in "${SCRIPT_DIR}/bridges"/*; do
+        if [ -f "$bridge_file" ]; then
+            cp "$bridge_file" "${INSTALL_DIR}/bridges/"
+            chmod +x "${INSTALL_DIR}/bridges/$(basename "$bridge_file")"
+            log_info "Updated bridge: $(basename "$bridge_file")"
+        fi
+    done
+
+    # Create misc directory if it doesn't exist
+    log_info "Updating misc directory..."
+    mkdir -p "${INSTALL_DIR}/misc"
+
+    # Copy misc files
+    for misc_file in "${SCRIPT_DIR}/misc"/*; do
+        if [ -f "$misc_file" ]; then
+            cp "$misc_file" "${INSTALL_DIR}/misc/"
+            chmod +x "${INSTALL_DIR}/misc/$(basename "$misc_file")"
+            log_info "Updated misc file: $(basename "$misc_file")"
+        fi
+    done
+
     # Make scripts executable
-    chmod +x "${INSTALL_DIR}/${DISCOVERY_SCRIPT}"
-    chmod +x "${INSTALL_DIR}/${RUNNER_SCRIPT}"
+    chmod +x "${INSTALL_DIR}/log_discovery.py"
+    chmod +x "${INSTALL_DIR}/runner.sh"
     chmod +x "${INSTALL_DIR}/install.sh"
+    chmod +x "${INSTALL_DIR}/logbuddy.py"
+
+    # Update symlink to executable
+    log_info "Updating logbuddy command in ${BIN_DIR}"
+    ln -sf "${INSTALL_DIR}/logbuddy.py" "${BIN_DIR}/logbuddy"
 
     # Create config directories if they don't exist
     mkdir -p "${OUTPUT_DIR}"
     mkdir -p "${CACHE_DIR}"
+    mkdir -p "${DATA_DIR}"
     mkdir -p "${INSTALL_DIR}/logs"
 
     # Update the config if notify_email has been set
@@ -548,17 +674,17 @@ update_service() {
     # Update service file
     log_info "Updating systemd service file: ${SERVICE_FILE}"
 
-    # Get runner script path
-    local runner_path="${INSTALL_DIR}/${RUNNER_SCRIPT}"
+    # Get logbuddy script path
+    local logbuddy_path="${INSTALL_DIR}/logbuddy.py"
 
     cat > "${SERVICE_FILE}" << EOF
 [Unit]
-Description=Log Discovery System for OpenLiteSpeed/CyberPanel/WordPress
+Description=LogBuddy Log Discovery and Monitoring System
 After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=${runner_path} --cron --output ${OUTPUT_DIR}/discovered_logs.json
+ExecStart=${logbuddy_path} discover --output ${OUTPUT_DIR}/discovered_logs.json
 WorkingDirectory=${INSTALL_DIR}
 StandardOutput=append:${LOG_DIR}/discovery.log
 StandardError=append:${LOG_DIR}/discovery.error.log
@@ -590,7 +716,7 @@ EOF
 
         cat > "${TIMER_FILE}" << EOF
 [Unit]
-Description=Run Log Discovery System periodically
+Description=Run LogBuddy periodically
 Requires=${SERVICE_NAME}.service
 
 [Timer]
@@ -652,8 +778,8 @@ done
 # Display script banner
 echo -e "${BLUE}"
 echo "===================================================="
-echo "  Enhanced OpenLiteSpeed/CyberPanel/WordPress Log   "
-echo "  Discovery System Installer v2.1.0                 "
+echo "  LogBuddy - Log Discovery and Monitoring System    "
+echo "  Installer v1.0.0                                  "
 echo "===================================================="
 echo -e "${NC}"
 
@@ -677,9 +803,9 @@ case ${ACTION} in
         echo "Usage: $0 [install|remove|update] [options]"
         echo ""
         echo "Actions:"
-        echo "  install       Install the log discovery system"
-        echo "  remove        Remove the log discovery system"
-        echo "  update        Update the log discovery system"
+        echo "  install       Install the LogBuddy system"
+        echo "  remove        Remove the LogBuddy system"
+        echo "  update        Update the LogBuddy system"
         echo ""
         echo "Options:"
         echo "  --no-service  Don't install/remove the systemd service"

@@ -228,6 +228,9 @@ def get_tree_node_html(path: str, name: str, is_dir: bool, indent: int, has_chil
     """Get HTML representation of a tree node."""
     prefix = "    " * indent
 
+    # Escape any special characters in the name
+    safe_name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
     if is_dir:
         if path in state.expanded_nodes:
             toggle_icon = "[-]"
@@ -247,7 +250,7 @@ def get_tree_node_html(path: str, name: str, is_dir: bool, indent: int, has_chil
             checkbox = '<class="tree.toggle.off">[ ]</class>'
 
         node_class = "tree.selected" if path in state.selected_logs else "tree"
-        return HTML(f"{prefix}{toggle}{checkbox} <{node_class}>{name}{'/'}</{node_class}>")
+        return HTML(f"{prefix}{toggle}{checkbox} <{node_class}>{safe_name}{'&#47;'}</{node_class}>")
     else:
         if path in state.selected_logs:
             checkbox = '<class="tree.toggle">[x]</class>'
@@ -255,7 +258,7 @@ def get_tree_node_html(path: str, name: str, is_dir: bool, indent: int, has_chil
             checkbox = '<class="tree.toggle.off">[ ]</class>'
 
         node_class = "tree.selected" if path in state.selected_logs else "tree"
-        return HTML(f"{prefix}    {checkbox} <{node_class}>{name}</{node_class}>")
+        return HTML(f"{prefix}    {checkbox} <{node_class}>{safe_name}</{node_class}>")
 
 
 def render_directory_tree() -> List[HTML]:

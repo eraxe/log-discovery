@@ -18,6 +18,7 @@
 #
 # Author: Claude
 # Created: April 21, 2025
+# Updated: For modular architecture
 # ==============================================================================
 
 set -e
@@ -39,6 +40,8 @@ NOTIFY_EMAIL=""
 # Script names
 RUNNER_SCRIPT="runner.sh"
 DISCOVERY_SCRIPT="log_discovery.py"
+BASE_CLASS_SCRIPT="log_source.py"
+MODULES_DIR="modules"
 
 # Colors for output
 RED='\033[0;31m'
@@ -195,12 +198,29 @@ install_system() {
     # Create logs directory for script logs
     mkdir -p "${INSTALL_DIR}/logs"
 
+    # Create modules directory
+    log_info "Creating modules directory: ${INSTALL_DIR}/${MODULES_DIR}"
+    mkdir -p "${INSTALL_DIR}/${MODULES_DIR}"
+
     # Copy files
     log_info "Copying files..."
     cp "${SCRIPT_DIR}/${DISCOVERY_SCRIPT}" "${INSTALL_DIR}/"
+    cp "${SCRIPT_DIR}/${BASE_CLASS_SCRIPT}" "${INSTALL_DIR}/"
     cp "${SCRIPT_DIR}/${RUNNER_SCRIPT}" "${INSTALL_DIR}/"
     cp "${SCRIPT_DIR}/README.md" "${INSTALL_DIR}/"
     cp "${SCRIPT_DIR}/install.sh" "${INSTALL_DIR}/"
+
+    # Copy module files
+    log_info "Copying module files..."
+    cp "${SCRIPT_DIR}/${MODULES_DIR}/__init__.py" "${INSTALL_DIR}/${MODULES_DIR}/"
+
+    # Copy all Python files in the modules directory
+    for module_file in "${SCRIPT_DIR}/${MODULES_DIR}"/*.py; do
+        if [ -f "$module_file" ]; then
+            cp "$module_file" "${INSTALL_DIR}/${MODULES_DIR}/"
+            log_info "Copied module: $(basename "$module_file")"
+        fi
+    done
 
     # Make scripts executable
     chmod +x "${INSTALL_DIR}/${DISCOVERY_SCRIPT}"
@@ -250,6 +270,8 @@ EOF
         echo "  systemctl start ${SERVICE_NAME}.service"
         echo "  systemctl status ${SERVICE_NAME}.timer"
     fi
+
+    log_info "To add new log source modules, place Python files in: ${INSTALL_DIR}/${MODULES_DIR}/"
 }
 
 install_service() {
@@ -458,9 +480,25 @@ update_system() {
     # Copy new files
     log_info "Updating files..."
     cp "${SCRIPT_DIR}/${DISCOVERY_SCRIPT}" "${INSTALL_DIR}/"
+    cp "${SCRIPT_DIR}/${BASE_CLASS_SCRIPT}" "${INSTALL_DIR}/"
     cp "${SCRIPT_DIR}/${RUNNER_SCRIPT}" "${INSTALL_DIR}/"
     cp "${SCRIPT_DIR}/README.md" "${INSTALL_DIR}/"
     cp "${SCRIPT_DIR}/install.sh" "${INSTALL_DIR}/"
+
+    # Create modules directory if it doesn't exist
+    log_info "Updating modules directory..."
+    mkdir -p "${INSTALL_DIR}/${MODULES_DIR}"
+
+    # Copy module initialization file
+    cp "${SCRIPT_DIR}/${MODULES_DIR}/__init__.py" "${INSTALL_DIR}/${MODULES_DIR}/"
+
+    # Copy all Python files in the modules directory
+    for module_file in "${SCRIPT_DIR}/${MODULES_DIR}"/*.py; do
+        if [ -f "$module_file" ]; then
+            cp "$module_file" "${INSTALL_DIR}/${MODULES_DIR}/"
+            log_info "Updated module: $(basename "$module_file")"
+        fi
+    done
 
     # Make scripts executable
     chmod +x "${INSTALL_DIR}/${DISCOVERY_SCRIPT}"
@@ -615,7 +653,7 @@ done
 echo -e "${BLUE}"
 echo "===================================================="
 echo "  Enhanced OpenLiteSpeed/CyberPanel/WordPress Log   "
-echo "  Discovery System Installer v2.0                   "
+echo "  Discovery System Installer v2.1.0                 "
 echo "===================================================="
 echo -e "${NC}"
 

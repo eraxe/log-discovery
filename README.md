@@ -465,210 +465,165 @@ Where `[action]` is one of:
 - `update`: Update an existing installation
 - `remove`: Remove the log discovery system
 
-## Installation
 
-### Standard Installation
+# Modular Log Discovery System
 
-To install the log discovery system with default settings:
+The log discovery system has been enhanced with a modular architecture that makes it easy to extend with support for additional log sources.
 
-```bash
-sudo ./install.sh install
+## Module Architecture
+
+The system now uses a plugin-based approach where each log source is implemented as a separate module in the `modules` directory. The main script automatically loads these modules at runtime, making it easy to add new log source types without modifying the core code.
+
+### Module Structure
+
+Each module follows this structure:
+
+1. A Python file in the `modules` directory (e.g., `modules/nginx.py`)
+2. A class that extends the `LogSource` base class
+3. Implementation of the `discover()` method to find logs of that type
+4. A `get_log_source()` function that returns the class
+
+### Benefits of the Modular Approach
+
+- **Extensibility**: Add new log sources without modifying the core code
+- **Maintainability**: Each log source is isolated, making the code easier to maintain
+- **Reusability**: Common functionality is in the base class, reducing duplication
+- **Testability**: Test each module independently
+- **Customizability**: Organizations can add their own modules for proprietary systems
+
+## Existing Modules
+
+The system comes with modules for:
+
+- **OpenLiteSpeed**: Web server logs
+- **CyberPanel**: Admin panel logs
+- **WordPress**: WordPress site logs
+- **PHP**: PHP configuration logs
+- **MySQL/MariaDB**: Database logs
+
+## Adding New Modules
+
+To add support for a new log source:
+
+1. Create a new Python file in the `modules` directory (e.g., `modules/nginx.py`)
+2. Use the `example_template.py` as a starting point
+3. Implement the `discover()` method to find logs of your type
+4. Ensure that your module has a `get_log_source()` function
+
+The module will be automatically loaded the next time you run the log discovery script.
+
+### Example Module Template
+
+A template is provided in `modules/example_template.py` that you can use as a starting point for your own modules.
+
+### Example: Creating a Nginx Module
+
+Here's a simplified example of how to create a module for Nginx logs:
+
+```python
+"""
+Module for discovering Nginx logs.
+"""
+
+import os
+import re
+import glob
+
+# Import the LogSource base class
+from log_source import LogSource
+
+class NginxLogSource(LogSource):
+    """Discovery for Nginx logs."""
+
+    def discover(self):
+        """Discover Nginx logs by examining configuration files."""
+        self.discoverer.log("Searching for Nginx logs...")
+
+        # Find Nginx config file
+        config_paths = [
+            "/etc/nginx/nginx.conf",
+            "/usr/local/nginx/conf/nginx.conf"
+        ]
+
+        config_file = next((path for path in config_paths if self._file_readable(path)), None)
+
+        if not config_file:
+            self.discoverer.log("Nginx config file not found", "WARN")
+            return self.logs_found
+
+        # Parse config file
+        config_content = self._load_file_content(config_file)
+        if not config_content:
+            return self.logs_found
+
+        # Extract log paths
+        error_log_match = re.search(r'error_log\s+(.+?)[\s;]', config_content)
+        if error_log_match:
+            error_log_path = error_log_match.group(1)
+            self.add_log(
+                "nginx_error",
+                error_log_path,
+                labels={"level": "error", "service": "webserver"}
+            )
+            self.logs_found += 1
+
+        # Check for vhost configs
+        vhost_dirs = ["/etc/nginx/sites-enabled", "/etc/nginx/conf.d"]
+        
+        for vhost_dir in vhost_dirs:
+            if os.path.exists(vhost_dir):
+                vhost_configs = glob.glob(f"{vhost_dir}/*.conf")
+                for vhost_config in vhost_configs:
+                    # Process each vhost config
+                    vhost_content = self._load_file_content(vhost_config)
+                    if vhost_content:
+                        # Extract vhost name
+                        vhost_name = os.path.basename(vhost_config).replace('.conf', '')
+                        
+                        # Look for access logs
+                        access_log_match = re.search(r'access_log\s+(.+?)[\s;]', vhost_content)
+                        if access_log_match:
+                            access_log_path = access_log_match.group(1)
+                            self.add_log(
+                                f"nginx_access_{vhost_name}",
+                                access_log_path,
+                                labels={"level": "access", "service": "webserver", "vhost": vhost_name}
+                            )
+                            self.logs_found += 1
+
+        return self.logs_found
+
+# Required function to return the log source class
+def get_log_source():
+    return NginxLogSource
 ```
 
-This will:
-- Create installation directory at `/opt/log-discovery`
-- Create log directory at `/var/log/log-discovery`
-- Create configuration directory at `/etc/log-discovery`
-- Install systemd service and timer for daily execution
-- Make scripts executable
+## Module Best Practices
 
-### Installation without Systemd Service
+When creating modules, follow these best practices:
 
-If you don't want to install the systemd service (for example, if you prefer to use cron):
+1. **Descriptive naming**: Use clear, descriptive names for your module and class
+2. **Document your code**: Include docstrings and comments
+3. **Handle errors gracefully**: Use try/except blocks and log warnings
+4. **Be efficient**: Use parallel processing for performance-critical operations
+5. **Check for existence**: Always verify that files/directories exist before accessing them
+6. **Add meaningful labels**: Include useful metadata with each log
+7. **Detect rotated logs**: Look for rotated log files (use `_find_rotated_logs()` helper)
+8. **Follow conventions**: Use the same patterns as the existing modules
 
-```bash
-sudo ./install.sh install --no-service
-```
+## Further Customization
 
-### Installation Process
+If you need more advanced customization, you can:
 
-The installation performs these steps:
+1. Modify the `log_source.py` file to enhance the base class
+2. Edit the main `log_discovery.py` script to change how modules are loaded
+3. Create a module that extends another module's functionality
 
-1. Checks for required dependencies (Python 3, PyYAML)
-2. Creates necessary directories:
-   - Installation directory: `/opt/log-discovery`
-   - Log directory: `/var/log/log-discovery`
-   - Configuration directory: `/etc/log-discovery`
-3. Copies script files to the installation directory
-4. Creates default configuration
-5. Sets up systemd service and timer (unless `--no-service` is specified)
-6. Provides a summary of the installation
+## Contributing Modules
 
-## Updating
+If you create a module for a common system, consider contributing it back to the project by:
 
-To update an existing installation:
-
-```bash
-sudo ./install.sh update
-```
-
-This will:
-- Back up existing files
-- Update scripts and configuration
-- Restart services if they were running
-
-## Removal
-
-To completely remove the log discovery system:
-
-```bash
-sudo ./install.sh remove
-```
-
-The removal process:
-1. Stops and disables any running services
-2. Removes script files
-3. Optionally removes configuration and logs (with confirmation)
-
-## Configuration
-
-After installation, you can customize the configuration:
-
-### Main Configuration File
-
-Located at `/etc/log-discovery/config.json`:
-
-```json
-{
-    "interval": "daily",
-    "output_dir": "/etc/log-discovery/output",
-    "output_format": "json",
-    "verbose": false
-}
-```
-
-Parameters:
-- `interval`: How often to run discovery (`hourly`, `daily`, or cron syntax like `0 4 * * *`)
-- `output_dir`: Directory to store discovery results
-- `output_format`: Output format (`json` or `yaml`)
-- `verbose`: Enable verbose logging
-
-### Systemd Service Configuration
-
-The installer creates:
-- `/etc/systemd/system/log-discovery.service`: Service definition
-- `/etc/systemd/system/log-discovery.timer`: Timer for scheduled execution
-
-To modify the execution schedule, edit the timer file and run:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart log-discovery.timer
-```
-
-## Troubleshooting
-
-### Checking Installation Status
-
-To verify the installation:
-
-```bash
-# Check if the service is running
-systemctl status log-discovery.timer
-
-# Check logs
-cat /var/log/log-discovery/discovery.log
-cat /var/log/log-discovery/discovery.error.log
-
-# Check if files were installed correctly
-ls -la /opt/log-discovery
-```
-
-### Common Issues
-
-#### Service not starting
-
-Check the status and logs:
-
-```bash
-systemctl status log-discovery.service
-journalctl -u log-discovery.service
-```
-
-#### Missing dependencies
-
-If you see Python module errors:
-
-```bash
-# For Debian/Ubuntu
-sudo apt-get update
-sudo apt-get install -y python3 python3-yaml mailutils jq
-
-# For CentOS/RHEL
-sudo yum install -y python3 python3-pyyaml mailx jq
-```
-
-#### Permission issues
-
-Ensure proper permissions:
-
-```bash
-sudo chown -R root:root /opt/log-discovery
-sudo chmod +x /opt/log-discovery/*.py /opt/log-discovery/*.sh
-```
-
-## Advanced Options
-
-The installer supports these options:
-
-```
-Usage: ./install.sh [install|remove|update] [--no-service]
-
-Options:
-  install     Install the log discovery system
-  remove      Remove the log discovery system
-  update      Update the log discovery system
-  --no-service  Don't install/remove the systemd service
-```
-
-## Example Installations
-
-### Minimal Installation with Cron
-
-```bash
-# Install without systemd service
-sudo ./install.sh install --no-service
-
-# Set up cron job manually
-(crontab -l 2>/dev/null; echo "0 4 * * * /opt/log-discovery/runner.sh --cron") | crontab -
-```
-
-### Full Installation with Custom Interval
-
-```bash
-# Install with default settings
-sudo ./install.sh install
-
-# Edit the timer for hourly execution
-sudo sed -i 's/OnCalendar=daily/OnCalendar=hourly/' /etc/systemd/system/log-discovery.timer
-
-# Reload and restart
-sudo systemctl daemon-reload
-sudo systemctl restart log-discovery.timer
-```
-
-## Next Steps
-
-After installation:
-
-1. Run the discovery manually to test:
-   ```bash
-   /opt/log-discovery/runner.sh --verbose
-   ```
-
-2. Check the output:
-   ```bash
-   cat /etc/log-discovery/output/discovered_logs.json
-   ```
-
-3. Configure integration with your log management system (like Loki/Promtail)
+1. Testing thoroughly on different environments
+2. Following the coding style of the existing modules
+3. Including documentation in the module docstring
+4. Submitting a pull request

@@ -4,8 +4,9 @@ Module for discovering MySQL/MariaDB logs.
 
 import os
 import re
-import glob
+import glob  # Explicitly import glob here as well
 import configparser
+import threading  # Added for thread-safe operations
 
 # Import the LogSource base class
 from log_source import LogSource
@@ -74,7 +75,7 @@ class MySQLLogSource(LogSource):
                         self.logs_found += 1
 
                         # Look for rotated logs
-                        self._find_rotated_logs(log_path, f"mysql_{log_type}", {
+                        self.logs_found += self._find_rotated_logs(log_path, f"mysql_{log_type}", {
                             "level": log_type,
                             "service": "database",
                             "rotated": "true"
@@ -89,7 +90,7 @@ class MySQLLogSource(LogSource):
                 self.logs_found += 1
 
                 # Look for rotated logs
-                self._find_rotated_logs(log_pattern, f"mysql_{log_type}", {
+                self.logs_found += self._find_rotated_logs(log_pattern, f"mysql_{log_type}", {
                     "level": log_type,
                     "service": "database",
                     "rotated": "true"
@@ -104,7 +105,7 @@ class MySQLLogSource(LogSource):
                 self.discoverer.log(f"Processing MySQL config: {config_path}")
 
                 try:
-                    # Read config file
+                    # Read config file using thread-safe method
                     config_content = self._load_file_content(config_path)
                     if not config_content:
                         continue
@@ -126,7 +127,7 @@ class MySQLLogSource(LogSource):
                         self.logs_found += 1
 
                         # Look for rotated logs
-                        self._find_rotated_logs(error_log, "mysql_error", {
+                        self.logs_found += self._find_rotated_logs(error_log, "mysql_error", {
                             "level": "error",
                             "service": "database",
                             "rotated": "true"
@@ -144,7 +145,7 @@ class MySQLLogSource(LogSource):
                         self.logs_found += 1
 
                         # Look for rotated logs
-                        self._find_rotated_logs(general_log, "mysql_general", {
+                        self.logs_found += self._find_rotated_logs(general_log, "mysql_general", {
                             "level": "general",
                             "service": "database",
                             "rotated": "true"
@@ -162,7 +163,7 @@ class MySQLLogSource(LogSource):
                         self.logs_found += 1
 
                         # Look for rotated logs
-                        self._find_rotated_logs(slow_log, "mysql_slow", {
+                        self.logs_found += self._find_rotated_logs(slow_log, "mysql_slow", {
                             "level": "slow",
                             "service": "database",
                             "rotated": "true"
@@ -185,6 +186,13 @@ class MySQLLogSource(LogSource):
                                     )
                                     self.logs_found += 1
 
+                                    # Look for rotated logs
+                                    self.logs_found += self._find_rotated_logs(error_log, "mysql_error", {
+                                        "level": "error",
+                                        "service": "database",
+                                        "rotated": "true"
+                                    })
+
                             # Extract general log path
                             general_log_match = re.search(r'general[-_]log[-_]file\s*=\s*(.+?)(?:\s|$)', config_content)
                             if general_log_match:
@@ -197,6 +205,13 @@ class MySQLLogSource(LogSource):
                                         labels={"level": "general", "service": "database"}
                                     )
                                     self.logs_found += 1
+
+                                    # Look for rotated logs
+                                    self.logs_found += self._find_rotated_logs(general_log, "mysql_general", {
+                                        "level": "general",
+                                        "service": "database",
+                                        "rotated": "true"
+                                    })
 
                             # Extract slow query log path
                             slow_log_match = re.search(r'slow[-_]query[-_]log[-_]file\s*=\s*(.+?)(?:\s|$)',
@@ -211,6 +226,13 @@ class MySQLLogSource(LogSource):
                                         labels={"level": "slow", "service": "database"}
                                     )
                                     self.logs_found += 1
+
+                                    # Look for rotated logs
+                                    self.logs_found += self._find_rotated_logs(slow_log, "mysql_slow", {
+                                        "level": "slow",
+                                        "service": "database",
+                                        "rotated": "true"
+                                    })
                     except Exception as nested_e:
                         self.discoverer.log(f"Error processing {config_path}: {str(nested_e)}", "ERROR")
 

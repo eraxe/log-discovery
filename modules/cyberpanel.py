@@ -8,6 +8,7 @@ import glob
 import json
 import subprocess
 import signal
+import threading  # Added for thread-safe operations
 
 # Import the LogSource base class
 from log_source import LogSource, timeout_handler
@@ -152,57 +153,93 @@ class CyberPanelLogSource(LogSource):
         if any(os.path.exists(d) for d in cyberpanel_dirs):
             return True
 
-        # Method 2: Check for CyberPanel processes
+        # Method 2: Check for CyberPanel processes - thread-safe implementation
         try:
-            # Use timeout to avoid hanging
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(5)  # 5 second timeout
+            result = {"output": "", "error": None}
 
-            output = subprocess.check_output("ps aux | grep -i cyberpanel | grep -v grep",
-                                          shell=True, stderr=subprocess.STDOUT).decode()
+            def run_cmd():
+                try:
+                    # Use Popen instead of check_output for better control
+                    process = subprocess.Popen(
+                        "ps aux | grep -i cyberpanel | grep -v grep",
+                        shell=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True
+                    )
+                    stdout, stderr = process.communicate(timeout=5)
+                    result["output"] = stdout
+                except Exception as e:
+                    result["error"] = str(e)
 
-            signal.alarm(0)  # Disable alarm
+            # Use threading with timeout
+            thread = threading.Thread(target=run_cmd)
+            thread.daemon = True
+            thread.start()
+            thread.join(5)  # 5 second timeout
 
-            if output and len(output.strip()) > 0:
+            if result["output"] and len(result["output"].strip()) > 0:
                 return True
         except Exception:
             pass  # Ignore errors
-        finally:
-            signal.alarm(0)  # Ensure alarm is disabled
 
-        # Method 3: Check for CyberPanel service
+        # Method 3: Check for CyberPanel service - thread-safe implementation
         try:
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(5)  # 5 second timeout
+            result = {"output": "", "error": None}
 
-            output = subprocess.check_output("systemctl list-units --type=service | grep -i cyberpanel",
-                                          shell=True, stderr=subprocess.STDOUT).decode()
+            def run_cmd():
+                try:
+                    process = subprocess.Popen(
+                        "systemctl list-units --type=service | grep -i cyberpanel",
+                        shell=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True
+                    )
+                    stdout, stderr = process.communicate(timeout=5)
+                    result["output"] = stdout
+                except Exception as e:
+                    result["error"] = str(e)
 
-            signal.alarm(0)  # Disable alarm
+            # Use threading with timeout
+            thread = threading.Thread(target=run_cmd)
+            thread.daemon = True
+            thread.start()
+            thread.join(5)  # 5 second timeout
 
-            if output and len(output.strip()) > 0:
+            if result["output"] and len(result["output"].strip()) > 0:
                 return True
         except Exception:
             pass  # Ignore errors
-        finally:
-            signal.alarm(0)  # Ensure alarm is disabled
 
-        # Method 4: Check for cyberpanel command
+        # Method 4: Check for cyberpanel command - thread-safe implementation
         try:
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(5)  # 5 second timeout
+            result = {"output": "", "error": None}
 
-            output = subprocess.check_output("which cyberpanel",
-                                          shell=True, stderr=subprocess.STDOUT).decode()
+            def run_cmd():
+                try:
+                    process = subprocess.Popen(
+                        "which cyberpanel",
+                        shell=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True
+                    )
+                    stdout, stderr = process.communicate(timeout=5)
+                    result["output"] = stdout
+                except Exception as e:
+                    result["error"] = str(e)
 
-            signal.alarm(0)  # Disable alarm
+            # Use threading with timeout
+            thread = threading.Thread(target=run_cmd)
+            thread.daemon = True
+            thread.start()
+            thread.join(5)  # 5 second timeout
 
-            if "cyberpanel" in output:
+            if "cyberpanel" in result["output"]:
                 return True
         except Exception:
             pass  # Ignore errors
-        finally:
-            signal.alarm(0)  # Ensure alarm is disabled
 
         return False
 
@@ -359,9 +396,7 @@ class CyberPanelLogSource(LogSource):
 
                 # Find all log files and potential rotated logs in the directory (recursive)
                 try:
-                    signal.signal(signal.SIGALRM, timeout_handler)
-                    signal.alarm(15)  # 15 second timeout
-
+                    # Thread-safe implementation without using signals
                     # Find all *.log* and other common log file extensions
                     log_patterns = [
                         f"{log_dir}/**/*.log*",
@@ -373,9 +408,11 @@ class CyberPanelLogSource(LogSource):
 
                     all_logs = []
                     for pattern in log_patterns:
-                        all_logs.extend(glob.glob(pattern, recursive=True))
-
-                    signal.alarm(0)  # Disable alarm
+                        try:
+                            # Use glob with recursive flag instead of subprocess
+                            all_logs.extend(glob.glob(pattern, recursive=True))
+                        except Exception as e:
+                            self.discoverer.log(f"Error globbing pattern {pattern}: {str(e)}", "DEBUG")
 
                     # Process each log file
                     for log_file in set(all_logs):  # Use set to remove duplicates
@@ -432,8 +469,6 @@ class CyberPanelLogSource(LogSource):
                         self.logs_found += 1
                 except Exception as e:
                     self.discoverer.log(f"Error scanning directory {log_dir}: {str(e)}", "WARN")
-                finally:
-                    signal.alarm(0)  # Ensure alarm is disabled
 
     def _scan_websites_logs(self):
         """Scan CyberPanel managed websites for logs."""
@@ -666,11 +701,8 @@ class CyberPanelLogSource(LogSource):
             if os.path.isdir(log_dir):
                 self.discoverer.log(f"Processing custom log directory: {log_dir}")
 
-                # Find all log files
+                # Find all log files - using glob with recursive flag
                 try:
-                    signal.signal(signal.SIGALRM, timeout_handler)
-                    signal.alarm(10)  # 10 second timeout
-
                     for log_file in glob.glob(f"{log_dir}/**/*.log*", recursive=True):
                         if not self.discoverer.is_log_already_added(log_file):
                             # Determine log level
@@ -697,12 +729,8 @@ class CyberPanelLogSource(LogSource):
                                 }
                             )
                             self.logs_found += 1
-
-                    signal.alarm(0)  # Disable alarm
                 except Exception as e:
                     self.discoverer.log(f"Error processing custom log directory {log_dir}: {str(e)}", "WARN")
-                finally:
-                    signal.alarm(0)  # Ensure alarm is disabled
 
     def _find_rotated_logs(self, log_path, name, labels):
         """Find rotated versions of a log file.
@@ -743,39 +771,6 @@ class CyberPanelLogSource(LogSource):
                     )
                     self.logs_found += 1
 
-    def _load_file_content(self, file_path):
-        """Load the content of a file safely.
-
-        Args:
-            file_path: Path to the file
-
-        Returns:
-            str: Content of the file or empty string on error
-        """
-        try:
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(5)  # 5 second timeout
-
-            with open(file_path, 'r') as f:
-                content = f.read()
-
-            signal.alarm(0)  # Disable alarm
-            return content
-        except Exception:
-            return ""
-        finally:
-            signal.alarm(0)  # Ensure alarm is disabled
-
-    def _file_readable(self, file_path):
-        """Check if a file is readable.
-
-        Args:
-            file_path: Path to the file
-
-        Returns:
-            bool: True if file is readable
-        """
-        try:
-            return os.path.isfile(file_path) and os.access(file_path, os.R_OK)
-        except Exception:
-            return False
+# Required function to return the log source class
+def get_log_source():
+    return CyberPanelLogSource

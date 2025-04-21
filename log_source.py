@@ -5,6 +5,8 @@ import os
 import re
 import signal
 import logging
+import glob
+import threading
 from abc import ABC, abstractmethod
 
 # Configure logging
@@ -90,24 +92,35 @@ class LogSource(ABC):
         if not self._file_readable(path):
             return ""
 
+        # Thread-safe implementation using threading instead of signals
         try:
-            # Set timeout for file operations
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(5)  # 5 second timeout
+            result = {"content": "", "error": None}
 
-            with open(path, 'r') as f:
-                content = f.read()
+            def read_file():
+                try:
+                    with open(path, 'r', errors='replace') as f:
+                        result["content"] = f.read()
+                except Exception as e:
+                    result["error"] = str(e)
 
-            signal.alarm(0)  # Disable alarm
-            return content
-        except (TimeoutError, UnicodeDecodeError, PermissionError, FileNotFoundError) as e:
-            logger.warning(f"Could not read file {path}: {str(e)}")
-            return ""
+            # Use threading with timeout instead of signals
+            thread = threading.Thread(target=read_file)
+            thread.daemon = True
+            thread.start()
+            thread.join(5)  # 5 second timeout
+
+            if thread.is_alive():
+                logger.warning(f"Timeout reading file {path}")
+                return ""
+
+            if result["error"]:
+                logger.warning(f"Error reading file {path}: {result['error']}")
+                return ""
+
+            return result["content"]
         except Exception as e:
             logger.warning(f"Unexpected error reading {path}: {str(e)}")
             return ""
-        finally:
-            signal.alarm(0)  # Ensure alarm is disabled
 
     def _find_rotated_logs(self, log_path, base_name, labels):
         """Find rotated versions of a log file.
@@ -140,6 +153,7 @@ class LogSource(ABC):
         # Check for each rotation pattern
         if os.path.exists(log_dir):
             for pattern in rotation_patterns:
+                # Use glob for file pattern matching
                 rotated_logs = glob.glob(os.path.join(log_dir, pattern))
                 for rotated_log in rotated_logs:
                     # Skip the original log

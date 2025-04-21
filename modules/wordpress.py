@@ -6,7 +6,7 @@ import os
 import re
 import glob
 import subprocess
-import signal  # Import moved to top level
+import threading  # Added for thread-safe operations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import the LogSource base class
@@ -38,51 +38,22 @@ class WordPressLogSource(LogSource):
         # Build list of wp-config.php files from search paths
         for search_path in wp_search_paths:
             if '*' in search_path:
-                # Handle wildcard paths with deeper search
+                # Handle wildcard paths with safer recursive search
                 for base_path in glob.glob(search_path.split('*')[0] + '*'):
-                    # Skip paths that clearly aren't web directories
-                    if any(excluded in base_path for excluded in ['/tmp', '/dev', '/proc', '/sys', '/run']):
-                        continue
-
-                    # Check if base path exists and is a directory
-                    if os.path.exists(base_path) and os.path.isdir(base_path):
-                        # Use find command for deeper, more efficient searching
-                        try:
-                            # Set timeout for subprocess
-                            signal.signal(signal.SIGALRM, timeout_handler)
-                            signal.alarm(30)  # 30 second timeout
-
-                            # Use find with -maxdepth 5 to prevent going too deep
-                            cmd = f"find {base_path} -maxdepth 5 -name wp-config.php 2>/dev/null"
-                            configs = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
-
-                            signal.alarm(0)  # Disable alarm
-
-                            # Add non-empty results to the set
-                            for config in configs:
-                                if config and os.path.exists(config):
-                                    wp_config_paths.add(config)
-                                    self.discoverer.log(f"Found WordPress config: {config}")
-                        except Exception as e:
-                            self.discoverer.log(f"Error searching for WordPress in {base_path}: {str(e)}", "DEBUG")
-                        finally:
-                            signal.alarm(0)  # Ensure alarm is disabled
+                    # Use our safer method instead of subprocess
+                    found_configs = self._find_wp_configs(base_path)
+                    for config in found_configs:
+                        if config and os.path.exists(config):
+                            wp_config_paths.add(config)
+                            self.discoverer.log(f"Found WordPress config: {config}")
             else:
                 # Regular path
                 if os.path.exists(search_path):
-                    # Check for wp-config.php directly in this path
-                    if os.path.exists(f"{search_path}/wp-config.php"):
-                        wp_config_paths.add(f"{search_path}/wp-config.php")
-                        self.discoverer.log(f"Found WordPress config: {search_path}/wp-config.php")
-
-                    # Check first-level subdirectories
-                    for item in os.listdir(search_path):
-                        item_path = os.path.join(search_path, item)
-                        if os.path.isdir(item_path):
-                            config_path = os.path.join(item_path, "wp-config.php")
-                            if os.path.exists(config_path):
-                                wp_config_paths.add(config_path)
-                                self.discoverer.log(f"Found WordPress config: {config_path}")
+                    found_configs = self._find_wp_configs(search_path, max_depth=2)
+                    for config in found_configs:
+                        if config and os.path.exists(config):
+                            wp_config_paths.add(config)
+                            self.discoverer.log(f"Found WordPress config: {config}")
 
         # Method 2: Check web server config files for DocumentRoot paths
         web_configs = []
@@ -147,29 +118,22 @@ class WordPressLogSource(LogSource):
         if not wp_config_paths:
             self.discoverer.log("No WordPress installations found with standard methods, trying system-wide search...", "WARN")
             try:
-                # Try using find for one final attempt, limited to common web directories
-                signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(60)  # 60 second timeout
-
-                cmd = "find /var/www /usr/local/lsws /home -name wp-config.php -type f 2>/dev/null"
-                configs = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
-
-                signal.alarm(0)  # Disable alarm
-
-                # Add non-empty results to the set
-                for config in configs:
-                    if config and os.path.exists(config):
-                        wp_config_paths.add(config)
-                        self.discoverer.log(f"Found WordPress config in system-wide search: {config}")
+                # Use our safer recursive method instead of subprocess
+                common_paths = ['/var/www', '/usr/local/lsws', '/home']
+                for base_path in common_paths:
+                    if os.path.exists(base_path):
+                        configs = self._find_wp_configs(base_path, max_depth=5)
+                        for config in configs:
+                            if config and os.path.exists(config):
+                                wp_config_paths.add(config)
+                                self.discoverer.log(f"Found WordPress config in system-wide search: {config}")
             except Exception as e:
                 self.discoverer.log(f"Error in system-wide WordPress search: {str(e)}", "WARN")
-            finally:
-                signal.alarm(0)  # Ensure alarm is disabled
 
-        # Process each WordPress installation in parallel
+        # Process each WordPress installation with a reduced number of workers
         self.discoverer.log(f"Processing {len(wp_config_paths)} WordPress installations...")
 
-        with ThreadPoolExecutor(max_workers=min(10, os.cpu_count() * 2)) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             future_to_config = {executor.submit(self._process_wordpress_site, wp_config): wp_config for wp_config in
                                 wp_config_paths}
 
@@ -182,6 +146,51 @@ class WordPressLogSource(LogSource):
                     self.discoverer.log(f"Error processing WordPress config {wp_config}: {str(e)}", "ERROR")
 
         return self.logs_found
+
+    def _find_wp_configs(self, base_path, max_depth=4):
+        """Find WordPress config files without using subprocess.
+
+        Args:
+            base_path: Base directory to search
+            max_depth: Maximum directory depth to search
+
+        Returns:
+            list: List of wp-config.php paths found
+        """
+        configs = []
+
+        # Skip paths that clearly aren't web directories
+        if any(excluded in base_path for excluded in ['/tmp', '/dev', '/proc', '/sys', '/run']):
+            return configs
+
+        # Check if base path exists and is a directory
+        if not os.path.exists(base_path) or not os.path.isdir(base_path):
+            return configs
+
+        # Function to recursively walk directories with depth control
+        def walk_with_depth(current_path, current_depth):
+            if current_depth > max_depth:
+                return
+
+            try:
+                # First check if wp-config.php exists in current directory
+                config_path = os.path.join(current_path, "wp-config.php")
+                if os.path.isfile(config_path):
+                    configs.append(config_path)
+
+                # Then recursively check subdirectories
+                for item in os.listdir(current_path):
+                    item_path = os.path.join(current_path, item)
+                    if os.path.isdir(item_path) and not item.startswith('.'):
+                        walk_with_depth(item_path, current_depth + 1)
+            except (PermissionError, OSError) as e:
+                # Skip directories we can't access
+                self.discoverer.log(f"Error accessing {current_path}: {str(e)}", "DEBUG")
+                pass
+
+        # Start the recursive search
+        walk_with_depth(base_path, 1)
+        return configs
 
     def _process_wordpress_site(self, wp_config):
         """Process a single WordPress site.
@@ -201,7 +210,7 @@ class WordPressLogSource(LogSource):
         # Extract domain from path if possible
         domain = self._extract_domain_from_path(site_path)
 
-        # Read wp-config.php
+        # Read wp-config.php using thread-safe method that doesn't use signals
         config_content = self._load_file_content(wp_config)
         if not config_content:
             return logs_found
@@ -297,7 +306,7 @@ class WordPressLogSource(LogSource):
         # Check for custom logging solutions
         logs_found += self._check_custom_wp_logging(site_path, site_name, domain)
 
-        # Check for standard error logs in WordPress directory and subdirectories (recursive search)
+        # Check for standard error logs in WordPress directory and subdirectories
         wp_error_logs = [
             os.path.join(site_path, 'error_log'),
             os.path.join(site_path, 'php_error.log'),
@@ -306,28 +315,32 @@ class WordPressLogSource(LogSource):
             os.path.join(site_path, 'wp-admin/error.log')
         ]
 
-        # Also recursively look for error logs in wp-content directory (common location)
+        # Also check for error logs in wp-content directory (common location) - more safely
         wp_content_dir = os.path.join(site_path, 'wp-content')
         if os.path.exists(wp_content_dir) and os.path.isdir(wp_content_dir):
             try:
-                signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(10)  # 10 second timeout
-
                 for root, dirs, files in os.walk(wp_content_dir, topdown=True):
                     # Skip very large directories like uploads with many files
-                    if 'uploads' in dirs and len(os.listdir(os.path.join(root, 'uploads'))) > 100:
+                    if 'uploads' in dirs and os.path.exists(os.path.join(root, 'uploads')):
+                        # Just check for log files directly rather than walking entire uploads dir
+                        upload_logs = [
+                            os.path.join(root, 'uploads', 'error_log'),
+                            os.path.join(root, 'uploads', 'error.log'),
+                            os.path.join(root, 'uploads', 'debug.log')
+                        ]
+                        for log_path in upload_logs:
+                            if os.path.exists(log_path):
+                                wp_error_logs.append(log_path)
+                        # Skip deeper traversal of uploads
                         dirs.remove('uploads')
 
+                    # Check for common log files in this directory
                     for file in files:
                         if file in ['error_log', 'error.log', 'debug.log', 'php_error.log']:
                             log_path = os.path.join(root, file)
                             wp_error_logs.append(log_path)
-
-                signal.alarm(0)  # Disable alarm
             except Exception as e:
-                self.discoverer.log(f"Error recursively searching for logs in {wp_content_dir}: {str(e)}", "DEBUG")
-            finally:
-                signal.alarm(0)  # Ensure alarm is disabled
+                self.discoverer.log(f"Error searching for logs in {wp_content_dir}: {str(e)}", "DEBUG")
 
         # Process found error logs
         for log_path in wp_error_logs:
@@ -465,14 +478,14 @@ class WordPressLogSource(LogSource):
                     vhost_name = vhost_match.group(1)
 
             if vhost_name:
-                # Look for PHP-FPM pool config
-                pool_paths = [
+                # Look for PHP-FPM pool config - using glob to avoid spawning processes
+                pool_patterns = [
                     f"/etc/php-fpm.d/{vhost_name}.conf",
                     f"/etc/php/*/fpm/pool.d/{vhost_name}.conf",
                     f"/usr/local/lsws/lsphp*/etc/php-fpm.d/{vhost_name}.conf"
                 ]
 
-                for pool_pattern in pool_paths:
+                for pool_pattern in pool_patterns:
                     for pool_path in glob.glob(pool_pattern):
                         pool_content = self._load_file_content(pool_path)
                         if pool_content:
@@ -681,7 +694,7 @@ class WordPressLogSource(LogSource):
                 if url_match:
                     return url_match.group(1)
 
-        # Method 3: Try to find domain from vhost configuration
+        # Method 3: Try to find domain from vhost configuration - safer version
         try:
             vhost_dirs = [
                 "/usr/local/lsws/conf/vhosts",
@@ -698,7 +711,9 @@ class WordPressLogSource(LogSource):
                 if os.path.exists(vhost_dir):
                     # Look for config files matching site name or containing the path
                     vhost_configs = glob.glob(f"{vhost_dir}/{site_name}*.conf")
-                    vhost_configs += glob.glob(f"{vhost_dir}/*.conf")  # Check all configs as fallback
+                    if not vhost_configs:
+                        # Check a subset of all configs as fallback (limited to avoid excessive file reading)
+                        vhost_configs = glob.glob(f"{vhost_dir}/*.conf")[:10]  # Limit to first 10 configs
 
                     for config in vhost_configs:
                         content = self._load_file_content(config)
@@ -717,9 +732,6 @@ class WordPressLogSource(LogSource):
             self.discoverer.log(f"Error extracting domain from vhost configs: {str(e)}", "DEBUG")
 
         return ""
-
-# Import signal module for timeout handling
-import signal
 
 # Required function to return the log source class
 def get_log_source():

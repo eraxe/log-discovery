@@ -40,6 +40,7 @@ import tempfile
 import subprocess
 import importlib
 import configparser
+import threading  # Added for thread-safe operations
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -191,7 +192,7 @@ class LogDiscoverer:
             if self.exclude_types:
                 sources = {k: v for k, v in sources.items() if k not in self.exclude_types}
 
-            # Run discovery for each source
+            # Run discovery for each source sequentially to avoid thread issues
             for source_name, source in sources.items():
                 self.log(f"Starting discovery for {source_name}")
                 try:
@@ -244,12 +245,36 @@ class LogDiscoverer:
             str: Hostname
         """
         try:
-            return subprocess.check_output("hostname", shell=True).decode().strip()
+            # Thread-safe implementation
+            result = {"hostname": "unknown", "error": None}
+
+            def get_hostname():
+                try:
+                    # Use Popen instead of check_output
+                    process = subprocess.Popen(
+                        "hostname",
+                        shell=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        universal_newlines=True
+                    )
+                    stdout, stderr = process.communicate(timeout=3)
+                    result["hostname"] = stdout.strip()
+                except Exception as e:
+                    result["error"] = str(e)
+
+            # Use threading with timeout
+            thread = threading.Thread(target=get_hostname)
+            thread.daemon = True
+            thread.start()
+            thread.join(3)  # 3 second timeout
+
+            return result["hostname"]
         except:
             return "unknown"
 
     def _compute_checksum(self, path):
-        """Compute checksum of a file.
+        """Compute checksum of a file in a thread-safe manner.
 
         Args:
             path: Path to file
@@ -261,23 +286,33 @@ class LogDiscoverer:
             return None
 
         try:
-            # Set timeout for file operations
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(3)  # 3 second timeout
+            result = {"checksum": None, "error": None}
 
-            with open(path, 'rb') as f:
-                checksum = hashlib.sha256(f.read()).hexdigest()
+            def calculate_checksum():
+                try:
+                    with open(path, 'rb') as f:
+                        result["checksum"] = hashlib.sha256(f.read()).hexdigest()
+                except Exception as e:
+                    result["error"] = str(e)
 
-            signal.alarm(0)  # Disable alarm
-            return checksum
-        except (TimeoutError, PermissionError, FileNotFoundError) as e:
-            self.log(f"Could not compute checksum for {path}: {str(e)}", "WARN")
-            return None
+            # Use threading with timeout instead of signals
+            thread = threading.Thread(target=calculate_checksum)
+            thread.daemon = True
+            thread.start()
+            thread.join(3)  # 3 second timeout
+
+            if thread.is_alive():
+                self.log(f"Timeout computing checksum for {path}", "WARN")
+                return None
+
+            if result["error"]:
+                self.log(f"Error computing checksum for {path}: {result['error']}", "WARN")
+                return None
+
+            return result["checksum"]
         except Exception as e:
             self.log(f"Unexpected error computing checksum for {path}: {str(e)}", "WARN")
             return None
-        finally:
-            signal.alarm(0)  # Ensure alarm is disabled
 
     def _load_cache(self):
         """Load discovery cache from file.

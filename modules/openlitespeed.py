@@ -5,6 +5,7 @@ Module for discovering OpenLiteSpeed logs.
 import os
 import re
 import glob
+import threading  # Added for thread-safe operations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Import the LogSource base class
@@ -76,8 +77,8 @@ class OpenLiteSpeedLogSource(LogSource):
         if vhost_dir:
             self.discoverer.log(f"Looking for vhost configs in {vhost_dir}")
 
-            # Use ThreadPoolExecutor for parallel processing of vhost configs
-            with ThreadPoolExecutor(max_workers=min(10, os.cpu_count() * 2)) as executor:
+            # Use ThreadPoolExecutor with reduced number of workers to avoid thread issues
+            with ThreadPoolExecutor(max_workers=4) as executor:
                 # Find all potential vhost config files
                 vhost_configs = glob.glob(f"{vhost_dir}/*/*.conf") + glob.glob(f"{vhost_dir}/*.conf")
 
@@ -171,6 +172,7 @@ class OpenLiteSpeedLogSource(LogSource):
 
         self.discoverer.log(f"Processing vhost: {vhost_name}")
 
+        # Use thread-safe method from base class that doesn't use signals
         vhost_content = self._load_file_content(vhost_config)
         if not vhost_content:
             return logs_found
@@ -202,7 +204,7 @@ class OpenLiteSpeedLogSource(LogSource):
             logs_found += 1
 
             # Also look for rotated versions of this log
-            self._find_rotated_logs(error_log_path, f"vhost_{vhost_name}_error", {
+            logs_found += self._find_rotated_logs(error_log_path, f"vhost_{vhost_name}_error", {
                 "level": "error",
                 "service": "webserver",
                 "vhost": vhost_name,
@@ -231,7 +233,7 @@ class OpenLiteSpeedLogSource(LogSource):
             logs_found += 1
 
             # Also look for rotated versions of this log
-            self._find_rotated_logs(access_log_path, f"vhost_{vhost_name}_access", {
+            logs_found += self._find_rotated_logs(access_log_path, f"vhost_{vhost_name}_access", {
                 "level": "access",
                 "service": "webserver",
                 "vhost": vhost_name,

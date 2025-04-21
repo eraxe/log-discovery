@@ -6,10 +6,11 @@ import os
 import re
 import glob
 import subprocess
-import signal
+import threading  # Added for thread-safe operations
+from concurrent.futures import ThreadPoolExecutor
 
 # Import the LogSource base class
-from log_source import LogSource, timeout_handler
+from log_source import LogSource
 
 class PHPLogSource(LogSource):
     """Discovery for PHP logs."""
@@ -88,48 +89,19 @@ class PHPLogSource(LogSource):
                 # Handle wildcard paths
                 for path in glob.glob(path_pattern):
                     for binary in php_binaries:
-                        if os.path.isfile(f"{path}/{binary}"):
-                            try:
-                                # Try to get version from binary
-                                signal.signal(signal.SIGALRM, timeout_handler)
-                                signal.alarm(5)  # 5 second timeout
-
-                                output = subprocess.check_output(f"{path}/{binary} -v",
-                                                                shell=True,
-                                                                stderr=subprocess.STDOUT).decode()
-
-                                signal.alarm(0)  # Disable alarm
-
-                                version_match = re.search(r'PHP (\d+\.\d+)', output)
-                                if version_match:
-                                    versions.append(version_match.group(1))
-                            except Exception:
-                                pass  # Ignore errors
-                            finally:
-                                signal.alarm(0)  # Ensure alarm is disabled
+                        binary_path = os.path.join(path, binary)
+                        if os.path.isfile(binary_path):
+                            version = self._check_php_version(binary_path)
+                            if version:
+                                versions.append(version)
             else:
                 # Regular path
                 for binary in php_binaries:
-                    binary_path = f"{path_pattern}/{binary}"
+                    binary_path = os.path.join(path_pattern, binary)
                     if os.path.isfile(binary_path):
-                        try:
-                            # Try to get version from binary
-                            signal.signal(signal.SIGALRM, timeout_handler)
-                            signal.alarm(5)  # 5 second timeout
-
-                            output = subprocess.check_output(f"{binary_path} -v",
-                                                            shell=True,
-                                                            stderr=subprocess.STDOUT).decode()
-
-                            signal.alarm(0)  # Disable alarm
-
-                            version_match = re.search(r'PHP (\d+\.\d+)', output)
-                            if version_match:
-                                versions.append(version_match.group(1))
-                        except Exception:
-                            pass  # Ignore errors
-                        finally:
-                            signal.alarm(0)  # Ensure alarm is disabled
+                        version = self._check_php_version(binary_path)
+                        if version:
+                            versions.append(version)
 
         # Remove duplicates and sort
         unique_versions = sorted(list(set(versions)), key=lambda v: [int(x) for x in v.split('.')])
@@ -139,6 +111,45 @@ class PHPLogSource(LogSource):
             unique_versions.append("")
 
         return unique_versions
+
+    def _check_php_version(self, binary_path):
+        """Check PHP version from binary in a thread-safe way.
+
+        Args:
+            binary_path: Path to PHP binary
+
+        Returns:
+            str: PHP version or None
+        """
+        if not os.path.isfile(binary_path):
+            return None
+
+        result = {"version": None, "error": None}
+
+        def run_php():
+            try:
+                # Use Popen instead of check_output for better control
+                process = subprocess.Popen(
+                    [binary_path, '-v'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True
+                )
+                stdout, stderr = process.communicate(timeout=3)
+
+                version_match = re.search(r'PHP (\d+\.\d+)', stdout)
+                if version_match:
+                    result["version"] = version_match.group(1)
+            except Exception as e:
+                result["error"] = str(e)
+
+        # Use threading with timeout
+        thread = threading.Thread(target=run_php)
+        thread.daemon = True
+        thread.start()
+        thread.join(5)  # 5 second timeout
+
+        return result["version"]
 
     def _discover_logs_for_version(self, version):
         """Discover logs for a specific PHP version.
@@ -179,7 +190,7 @@ class PHPLogSource(LogSource):
         for ini_path in ini_paths:
             self.discoverer.log(f"Processing PHP{version} ini: {ini_path}")
 
-            # Read ini file
+            # Read ini file using thread-safe method
             ini_content = self._load_file_content(ini_path)
             if not ini_content:
                 continue
@@ -205,7 +216,7 @@ class PHPLogSource(LogSource):
                     logs_found += 1
 
                     # Look for rotated logs
-                    self._find_rotated_logs(error_log, f"{name_prefix}error", {
+                    logs_found += self._find_rotated_logs(error_log, f"{name_prefix}error", {
                         "level": "error",
                         "service": "php",
                         "version": version if version else "",
@@ -313,7 +324,7 @@ class PHPLogSource(LogSource):
                     logs_found += 1
 
                     # Look for rotated logs
-                    self._find_rotated_logs(error_log, f"{name_prefix}error", {
+                    logs_found += self._find_rotated_logs(error_log, f"{name_prefix}error", {
                         "level": "error",
                         "service": "php-fpm",
                         "version": version if version else "",
@@ -342,7 +353,7 @@ class PHPLogSource(LogSource):
                     logs_found += 1
 
                     # Look for rotated logs
-                    self._find_rotated_logs(slow_log, f"{name_prefix}slow", {
+                    logs_found += self._find_rotated_logs(slow_log, f"{name_prefix}slow", {
                         "level": "slow",
                         "service": "php-fpm",
                         "version": version if version else "",
@@ -371,7 +382,7 @@ class PHPLogSource(LogSource):
                     logs_found += 1
 
                     # Look for rotated logs
-                    self._find_rotated_logs(access_log, f"{name_prefix}access", {
+                    logs_found += self._find_rotated_logs(access_log, f"{name_prefix}access", {
                         "level": "access",
                         "service": "php-fpm",
                         "version": version if version else "",

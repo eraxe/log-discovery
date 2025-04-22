@@ -1,0 +1,76 @@
+graph TD
+    %% Main User Interface
+    USER[User] --> LOGBUDDY[logbuddy.py]
+    
+    %% Core Commands
+    LOGBUDDY --> INIT[init command]
+    LOGBUDDY --> DISCOVER[discover command]
+    LOGBUDDY --> CONFIG[config command]
+    LOGBUDDY --> INSTALL[install command]
+    LOGBUDDY --> START[start command]
+    LOGBUDDY --> STOP[stop command]
+    LOGBUDDY --> STATUS[status command]
+    LOGBUDDY --> SETTINGS[settings command]
+    LOGBUDDY --> UPDATE[update command]
+    
+    %% Settings Management
+    SETTINGS --> CFG_FILE[(config.json)]
+    
+    %% Log Discovery
+    DISCOVER --> DIRECT{Direct Discovery}
+    DISCOVER --> LEGACY{Legacy Mode}
+    DIRECT --> LOG_DISC[log_discovery.py]
+    LEGACY --> RUNNER[runner.sh]
+    RUNNER --> LOG_DISC
+    LOG_DISC --> MODULES[Log Source Modules]
+    MODULES --> DISC_OUTPUT[(discovered_logs.json)]
+    
+    %% Configuration
+    CONFIG --> SKIP{Skip Tree View?}
+    SKIP -->|Yes| AUTO_CONFIG[Automatic Configuration]
+    SKIP -->|No| TREE_CONFIG[Tree View Configuration]
+    TREE_CONFIG --> CONF_GEN[promtail_conf_gen.py]
+    AUTO_CONFIG --> PROM_SETTINGS[(promtail-config-settings.yaml)]
+    CONF_GEN --> PROM_SETTINGS
+    
+    %% Configuration Update
+    UPDATE --> PROM_BRIDGE[promtail.py Bridge]
+    PROM_SETTINGS --> PROM_BRIDGE
+    DISC_OUTPUT --> PROM_BRIDGE
+    PROM_BRIDGE --> PROM_CONFIG[(promtail-config.yaml)]
+    
+    %% Installation
+    INSTALL --> BACKEND{Backend Type}
+    BACKEND -->|Loki/Promtail| LOKI_INSTALL[podman-loki-promtail.sh] 
+    BACKEND -->|Others| OTHER_INSTALL[Other Backends]
+    LOKI_INSTALL --> CONTAINERS[(Loki & Promtail Containers)]
+    
+    %% Start/Stop Monitoring
+    START --> POD_BRIDGE[podman.sh Bridge]
+    STOP --> CONTAINERS
+    POD_BRIDGE --> CONTAINERS
+    POD_BRIDGE --> PROM_CONFIG
+    
+    %% Status Check
+    STATUS --> CONTAINERS
+    
+    %% Setup Wizard
+    INIT --> WIZARD[Setup Wizard]
+    WIZARD --> CFG_FILE
+    WIZARD --> DISCOVER
+    WIZARD --> CONFIG
+    WIZARD --> INSTALL
+    WIZARD --> START
+
+    %% Styling
+    classDef primary fill:#3498db,stroke:#2980b9,color:#fff
+    classDef secondary fill:#2ecc71,stroke:#27ae60,color:#fff
+    classDef tertiary fill:#f39c12,stroke:#f1c40f,color:#fff
+    classDef storage fill:#95a5a6,stroke:#7f8c8d,color:#fff
+    classDef decision fill:#e74c3c,stroke:#c0392b,color:#fff
+    
+    class LOGBUDDY,WIZARD primary
+    class DISCOVER,CONFIG,INSTALL,START,STOP,STATUS,SETTINGS,UPDATE,INIT secondary
+    class LOG_DISC,PROM_BRIDGE,POD_BRIDGE,CONF_GEN tertiary
+    class CFG_FILE,DISC_OUTPUT,PROM_CONFIG,PROM_SETTINGS,CONTAINERS storage
+    class DIRECT,LEGACY,SKIP,BACKEND decision

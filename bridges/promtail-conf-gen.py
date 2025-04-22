@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
 """
-LogBuddy - CLI Promtail Configuration Generator
+LogBuddy - Promtail Configuration Generator
 
-A command-line tool for generating Promtail configurations based on discovered logs.
-Features a text-based tree navigation system for toggling directories and files on/off.
+A curses-based tool for generating Promtail configurations based on discovered logs.
+Features a navigable tree interface for toggling directories and files on/off.
 
 Usage:
-    ./promtail-conf-gen.py [--input discovery.json] [--output config.yaml]
-                         [--auto-select all|none|recommended]
-                         [--include-types type1,type2,...]
-                         [--include-services service1,service2,...]
-                         [--include-paths path1,path2,...]
-                         [--exclude-paths path1,path2,...]
-                         [--loki-url URL] [--promtail-port PORT]
-                         [--container-engine docker|podman]
-                         [--no-interactive]
+    logbuddy config [options]
+
+Options:
+    --input FILE      Input JSON file from log discovery
+    --output FILE     Output YAML file for configuration
+    --auto-select     Auto-select logs (all, none, recommended)
+    --include-types   Include specific log types (comma-separated)
+    --include-services Include specific services (comma-separated)
+    --non-interactive Run in non-interactive mode
+    --help            Show this help message
+
+Navigation:
+    ↑/↓               Move up/down in the tree
+    →/←               Expand/collapse directory or move right/left
+    SPACE             Expand/collapse directory
+    ENTER             Toggle selection of current item
+    a                 Toggle all items on
+    A                 Toggle all items off
+    s                 Save configuration and exit
+    q                 Exit (prompts for save)
+    h                 Show help
 """
 
 import os
@@ -24,7 +36,10 @@ import json
 import yaml
 import glob
 import argparse
-from typing import Dict, List, Set, Tuple, Optional, Any
+import curses
+import signal
+from typing import Dict, List, Set, Tuple, Optional, Any, Union
+from functools import partial
 
 # Default paths
 DEFAULT_INPUT_PATH = "output/discovered_logs.json"
@@ -43,6 +58,90 @@ DEFAULT_MAX_NAME_LENGTH = 40
 RECOMMENDED_TYPES = {"openlitespeed", "wordpress", "php", "mysql", "cyberpanel"}
 RECOMMENDED_SERVICES = {"webserver", "wordpress", "database", "script_handler"}
 
+# Visual indicators
+INDICATOR_ENABLED = "●"  # Green dot for enabled items
+INDICATOR_DISABLED = "●"  # Red dot for disabled items
+INDICATOR_EXPANDED = "▼"  # Down triangle for expanded directories
+INDICATOR_COLLAPSED = "▶"  # Right triangle for collapsed directories
+
+# Tree node types
+TYPE_DIR = "directory"
+TYPE_FILE = "file"
+
+# Color pairs
+COLOR_NORMAL = 1
+COLOR_SELECTED = 2
+COLOR_ENABLED = 3
+COLOR_DISABLED = 4
+COLOR_TITLE = 5
+COLOR_STATUS = 6
+COLOR_HELP = 7
+
+# Global state to store curses objects
+curses_state = {
+    'screen': None,
+    'max_y': 0,
+    'max_x': 0
+}
+
+
+class TreeNode:
+    """Tree node representation for navigation."""
+
+    def __init__(self, name: str, path: str, node_type: str, parent=None):
+        self.name = name
+        self.path = path
+        self.type = node_type  # 'directory' or 'file'
+        self.parent = parent
+        self.children = []
+        self.is_expanded = False
+        self.is_selected = False
+        self.log_data = None  # For storing log metadata
+
+    def add_child(self, child):
+        """Add a child node."""
+        self.children.append(child)
+
+    def toggle_expanded(self):
+        """Toggle expanded state."""
+        if self.type == TYPE_DIR:
+            self.is_expanded = not self.is_expanded
+
+    def toggle_selected(self):
+        """Toggle selected state."""
+        self.is_selected = not self.is_selected
+
+    def select_all(self, value: bool = True):
+        """Select or deselect this node and all children."""
+        self.is_selected = value
+        for child in self.children:
+            child.select_all(value)
+
+    def get_selected_paths(self) -> List[str]:
+        """Get all selected paths in this subtree."""
+        paths = []
+        if self.is_selected and self.type == TYPE_FILE:
+            paths.append(self.path)
+
+        for child in self.children:
+            paths.extend(child.get_selected_paths())
+
+        return paths
+
+    def count_selected(self) -> int:
+        """Count selected nodes in this subtree."""
+        count = 1 if self.is_selected and self.type == TYPE_FILE else 0
+        for child in self.children:
+            count += child.count_selected()
+        return count
+
+    def count_total(self) -> int:
+        """Count total file nodes in this subtree."""
+        count = 1 if self.type == TYPE_FILE else 0
+        for child in self.children:
+            count += child.count_total()
+        return count
+
 
 class LogConfig:
     """Class to hold log configuration state."""
@@ -56,9 +155,8 @@ class LogConfig:
         self.log_services = set()
         self.include_patterns = []
         self.exclude_patterns = []
-        # Directory tree
-        self.log_tree = {}
-        self.expanded_nodes = set()
+        # Tree structure
+        self.root_node = None
         # Configuration settings
         self.loki_url = DEFAULT_LOKI_URL
         self.promtail_port = DEFAULT_PROMTAIL_PORT
@@ -68,6 +166,15 @@ class LogConfig:
         self.max_log_size_mb = DEFAULT_MAX_LOG_SIZE_MB
         self.shorten_names = True
         self.max_name_length = DEFAULT_MAX_NAME_LENGTH
+        # UI state
+        self.current_node = None
+        self.top_node_idx = 0
+        self.visible_nodes = []
+        self.show_help = False
+        self.status_message = ""
+        self.exit_requested = False
+        self.save_requested = False
+        self.modified = False
 
 
 def load_discovered_logs(file_path: str) -> List[Dict]:
@@ -95,59 +202,71 @@ def extract_log_metadata(logs: List[Dict], config: LogConfig) -> None:
             config.log_services.add(service)
 
 
-def build_directory_tree(logs: List[Dict]) -> Dict:
-    """Build a tree structure from log paths."""
-    tree = {}
+def build_tree_structure(logs: List[Dict]) -> TreeNode:
+    """Build a navigable tree structure from log paths."""
+    root = TreeNode('/', '/', TYPE_DIR)
+
     for log in logs:
         path = log.get('path', '')
-        if not path:
-            continue
-
-        # Skip if log doesn't exist
-        if log.get('exists', True) is False:
+        if not path or log.get('exists', True) is False:
             continue
 
         # Split path into components
         components = path.split('/')
         components = [c for c in components if c]  # Remove empty components
 
-        # Build tree
-        current = tree
-        full_path = ""
+        # Start from root
+        current_node = root
+        current_path = ''
+
+        # Create directory nodes
         for i, component in enumerate(components):
-            full_path = full_path + '/' + component if full_path else '/' + component
+            current_path = current_path + '/' + component if current_path else '/' + component
+
+            # Check if this node already exists
+            existing_node = None
+            for child in current_node.children:
+                if child.name == component:
+                    existing_node = child
+                    break
 
             if i == len(components) - 1:
                 # This is a leaf (file)
-                if '__files__' not in current:
-                    current['__files__'] = []
-                current['__files__'].append({
-                    'path': path,
-                    'name': component,
-                    'full_path': full_path,
-                    'log': log
-                })
+                if not existing_node:
+                    file_node = TreeNode(component, path, TYPE_FILE, current_node)
+                    file_node.log_data = log
+                    current_node.add_child(file_node)
             else:
                 # This is a directory
-                if component not in current:
-                    current[component] = {}
-                current = current[component]
+                if not existing_node:
+                    dir_node = TreeNode(component, current_path, TYPE_DIR, current_node)
+                    current_node.add_child(dir_node)
+                    current_node = dir_node
+                else:
+                    current_node = existing_node
 
-    return tree
+    return root
 
 
 def auto_select_logs(selection_type: str, config: LogConfig) -> None:
     """Auto-select logs based on selection type."""
     if selection_type == 'all':
         # Select all logs
-        for log in config.discovered_logs:
-            path = log.get('path', '')
-            if path and log.get('exists', True) is not False:
-                config.selected_logs.add(path)
+        if config.root_node:
+            config.root_node.select_all(True)
 
         # Select all types and services
         config.selected_types = config.log_types.copy()
         config.selected_services = config.log_services.copy()
+
+    elif selection_type == 'none':
+        # Deselect all logs
+        if config.root_node:
+            config.root_node.select_all(False)
+
+        # Clear type and service selections
+        config.selected_types.clear()
+        config.selected_services.clear()
 
     elif selection_type == 'recommended':
         # Select recommended types
@@ -156,407 +275,37 @@ def auto_select_logs(selection_type: str, config: LogConfig) -> None:
         # Select recommended services
         config.selected_services = RECOMMENDED_SERVICES.intersection(config.log_services)
 
-        # Select logs matching recommended types and services
-        for log in config.discovered_logs:
-            if log.get('exists', True) is False:
-                continue
+        # Select logs by type and service
+        if config.root_node:
+            mark_logs_by_type_service(config)
 
-            path = log.get('path', '')
-            if not path:
-                continue
 
-            log_type = log.get('type', '')
-            service = log.get('labels', {}).get('service', '')
+def mark_logs_by_type_service(config: LogConfig) -> None:
+    """Mark logs as selected based on type and service."""
+
+    def process_node(node: TreeNode):
+        if node.type == TYPE_FILE and node.log_data:
+            log_type = node.log_data.get('type', '')
+            service = node.log_data.get('labels', {}).get('service', '')
 
             if (log_type in config.selected_types or
                     service in config.selected_services):
-                config.selected_logs.add(path)
+                node.is_selected = True
 
+        for child in node.children:
+            process_node(child)
 
-def get_input_with_default(prompt: str, default: str = "") -> str:
-    """Get user input with a default value."""
-    if default:
-        value = input(f"{prompt} [{default}]: ").strip()
-        return value if value else default
-    else:
-        return input(f"{prompt}: ").strip()
-
-
-def interactive_tree_selection(config: LogConfig) -> None:
-    """Interactive tree-based selection interface."""
-    print("\n==== LogBuddy Promtail Configuration Generator ====\n")
-
-    # First, handle type and service selection
-    handle_type_service_selection(config)
-
-    # Then, handle tree-based log selection
-    print("\n==== Log Directory Tree Navigation ====")
-    print("Navigate the tree and select which logs to monitor\n")
-
-    # Build tree structure if not done already
-    if not config.log_tree:
-        config.log_tree = build_directory_tree(config.discovered_logs)
-
-    # Start with root node expanded
-    config.expanded_nodes.add("/")
-
-    # Run tree navigation
-    tree_navigation(config)
-
-
-def handle_type_service_selection(config: LogConfig) -> None:
-    """Handle selection of log types and services."""
-    # 1. Select log types
-    print("\nAvailable log types:")
-    types_list = sorted(config.log_types)
-    for i, log_type in enumerate(types_list):
-        print(f"  {i + 1}. {log_type}")
-
-    print("\nEnter the numbers of log types to include (comma-separated, or 'all' or 'recommended'):")
-    type_input = input("> ").strip()
-
-    if type_input.lower() == 'all':
-        config.selected_types = config.log_types.copy()
-    elif type_input.lower() == 'recommended':
-        config.selected_types = RECOMMENDED_TYPES.intersection(config.log_types)
-    elif type_input:
-        try:
-            indices = [int(idx.strip()) - 1 for idx in type_input.split(',')]
-            for idx in indices:
-                if 0 <= idx < len(types_list):
-                    config.selected_types.add(types_list[idx])
-        except ValueError:
-            print("Invalid input. Using recommended types.")
-            config.selected_types = RECOMMENDED_TYPES.intersection(config.log_types)
-
-    # 2. Select services
-    print("\nAvailable services:")
-    services_list = sorted(config.log_services)
-    for i, service in enumerate(services_list):
-        print(f"  {i + 1}. {service}")
-
-    print("\nEnter the numbers of services to include (comma-separated, or 'all' or 'recommended'):")
-    service_input = input("> ").strip()
-
-    if service_input.lower() == 'all':
-        config.selected_services = config.log_services.copy()
-    elif service_input.lower() == 'recommended':
-        config.selected_services = RECOMMENDED_SERVICES.intersection(config.log_services)
-    elif service_input:
-        try:
-            indices = [int(idx.strip()) - 1 for idx in service_input.split(',')]
-            for idx in indices:
-                if 0 <= idx < len(services_list):
-                    config.selected_services.add(services_list[idx])
-        except ValueError:
-            print("Invalid input. Using recommended services.")
-            config.selected_services = RECOMMENDED_SERVICES.intersection(config.log_services)
-
-    # 3. Configure additional settings
-    print("\nAdditional Settings:")
-
-    # Loki URL
-    loki_url = get_input_with_default("Loki URL", config.loki_url)
-    config.loki_url = loki_url
-
-    # Promtail port
-    port_input = get_input_with_default("Promtail port", str(config.promtail_port))
-    try:
-        config.promtail_port = int(port_input)
-    except ValueError:
-        print(f"Invalid port. Using default: {config.promtail_port}")
-
-    # Container engine
-    engine = get_input_with_default("Container engine (docker/podman)", config.container_engine).lower()
-    if engine in ('docker', 'podman'):
-        config.container_engine = engine
-
-
-def tree_navigation(config: LogConfig) -> None:
-    """Interactive tree navigation for log selection."""
-    current_path = "/"
-    show_path = True
-
-    # Auto-select logs based on type and service
-    for log in config.discovered_logs:
-        if log.get('exists', True) is False:
-            continue
-
-        path = log.get('path', '')
-        if not path:
-            continue
-
-        log_type = log.get('type', '')
-        service = log.get('labels', {}).get('service', '')
-
-        if (log_type in config.selected_types or
-                service in config.selected_services):
-            config.selected_logs.add(path)
-
-    while True:
-        if show_path:
-            print_directory_tree(config, current_path)
-            show_path = False
-
-        print("\nCommands:")
-        print("  e - Expand/collapse directory")
-        print("  s - Select/deselect log")
-        print("  c - Change directory")
-        print("  u - Go up one directory")
-        print("  a - Select all logs in current directory")
-        print("  d - Deselect all logs in current directory")
-        print("  r - Refresh tree view")
-        print("  f - Done with selection")
-
-        command = input("\nEnter command: ").strip().lower()
-
-        if command == 'e':
-            # Expand/collapse directory
-            dir_number = input("Enter directory number to expand/collapse: ").strip()
-            try:
-                dir_number = int(dir_number)
-                path = get_path_by_number(config, current_path, dir_number, is_dir=True)
-                if path:
-                    if path in config.expanded_nodes:
-                        config.expanded_nodes.remove(path)
-                    else:
-                        config.expanded_nodes.add(path)
-                    show_path = True
-                else:
-                    print("Invalid directory number")
-            except ValueError:
-                print("Invalid input. Please enter a number.")
-
-        elif command == 's':
-            # Select/deselect log
-            log_number = input("Enter log number to select/deselect: ").strip()
-            try:
-                log_number = int(log_number)
-                path = get_path_by_number(config, current_path, log_number, is_dir=False)
-                if path:
-                    if path in config.selected_logs:
-                        config.selected_logs.remove(path)
-                    else:
-                        config.selected_logs.add(path)
-                    show_path = True
-                else:
-                    print("Invalid log number")
-            except ValueError:
-                print("Invalid input. Please enter a number.")
-
-        elif command == 'c':
-            # Change directory
-            dir_number = input("Enter directory number to navigate to: ").strip()
-            try:
-                dir_number = int(dir_number)
-                path = get_path_by_number(config, current_path, dir_number, is_dir=True)
-                if path:
-                    current_path = path
-                    config.expanded_nodes.add(path)
-                    show_path = True
-                else:
-                    print("Invalid directory number")
-            except ValueError:
-                print("Invalid input. Please enter a number.")
-
-        elif command == 'u':
-            # Go up one directory
-            if current_path == "/":
-                print("Already at root directory")
-            else:
-                parent_path = os.path.dirname(current_path)
-                current_path = parent_path if parent_path else "/"
-                show_path = True
-
-        elif command == 'a':
-            # Select all logs in current directory
-            select_all_in_directory(config, current_path)
-            show_path = True
-
-        elif command == 'd':
-            # Deselect all logs in current directory
-            deselect_all_in_directory(config, current_path)
-            show_path = True
-
-        elif command == 'r':
-            # Refresh view
-            show_path = True
-
-        elif command == 'f':
-            # Finished with selection
-            break
-
-        else:
-            print("Unknown command")
-
-
-def print_directory_tree(config: LogConfig, current_path: str) -> None:
-    """Print the directory tree for the current path."""
-    # Clear the screen
-    os.system('clear' if os.name == 'posix' else 'cls')
-
-    print(f"\nCurrent directory: {current_path}")
-    print("=" * 50)
-
-    # Get the subdirectory to render
-    subdir = get_subdirectory(config.log_tree, current_path)
-    if not subdir:
-        print("Directory not found or empty")
-        return
-
-    # Print directories first
-    dir_num = 1
-    dirs = sorted(k for k in subdir.keys() if k != '__files__')
-    for key in dirs:
-        dir_path = os.path.join(current_path, key).replace("//", "/")
-        is_expanded = dir_path in config.expanded_nodes
-
-        # Count selected logs in this directory
-        selected_count = count_selected_logs_in_dir(config, dir_path)
-        total_count = count_total_logs_in_dir(config, dir_path)
-
-        # Calculate selection ratio
-        if total_count > 0:
-            selection_indicator = f"[{selected_count}/{total_count}]"
-        else:
-            selection_indicator = "[empty]"
-
-        # Expanded indicator
-        expanded_indicator = "-" if is_expanded else "+"
-
-        print(f"{dir_num}. [{expanded_indicator}] {key}/ {selection_indicator}")
-
-        # If expanded, show subdirectories (only one level for clarity)
-        if is_expanded:
-            subsubdir = subdir[key]
-            for subkey in sorted(k for k in subsubdir.keys() if k != '__files__'):
-                subdir_path = os.path.join(dir_path, subkey).replace("//", "/")
-                sub_selected = count_selected_logs_in_dir(config, subdir_path)
-                sub_total = count_total_logs_in_dir(config, subdir_path)
-
-                if sub_total > 0:
-                    sub_indicator = f"[{sub_selected}/{sub_total}]"
-                else:
-                    sub_indicator = "[empty]"
-
-                print(f"   - {subkey}/ {sub_indicator}")
-
-        dir_num += 1
-
-    # Print files
-    if '__files__' in subdir:
-        log_num = 1
-        for file in sorted(subdir['__files__'], key=lambda x: x['name']):
-            file_path = file['path']
-            file_name = file['name']
-
-            # Check if selected
-            is_selected = file_path in config.selected_logs
-            selected_indicator = "X" if is_selected else " "
-
-            # Get log type and service if available
-            log_type = file['log'].get('type', '')
-            service = file['log'].get('labels', {}).get('service', '')
-
-            info = ""
-            if log_type:
-                info += f"type={log_type}"
-            if service:
-                info += f" service={service}" if info else f"service={service}"
-
-            if info:
-                info = f" ({info})"
-
-            print(f"{log_num}. [{selected_indicator}] {file_name}{info}")
-            log_num += 1
-
-
-def get_subdirectory(tree: Dict, path: str) -> Dict:
-    """Get a subdirectory from the tree structure based on path."""
-    if path == "/":
-        return tree
-
-    # Split path into components
-    components = [c for c in path.strip('/').split('/') if c]
-
-    # Traverse the tree
-    current = tree
-    for component in components:
-        if component in current:
-            current = current[component]
-        else:
-            return None
-
-    return current
-
-
-def get_path_by_number(config: LogConfig, current_path: str, number: int, is_dir: bool) -> Optional[str]:
-    """Get path by its display number."""
-    subdir = get_subdirectory(config.log_tree, current_path)
-    if not subdir:
-        return None
-
-    if is_dir:
-        # Get directories
-        dirs = sorted(k for k in subdir.keys() if k != '__files__')
-        if 1 <= number <= len(dirs):
-            key = dirs[number - 1]
-            return os.path.join(current_path, key).replace("//", "/")
-    else:
-        # Get files
-        if '__files__' in subdir:
-            files = sorted(subdir['__files__'], key=lambda x: x['name'])
-            if 1 <= number <= len(files):
-                return files[number - 1]['path']
-
-    return None
-
-
-def count_selected_logs_in_dir(config: LogConfig, dir_path: str) -> int:
-    """Count selected logs in a directory and its subdirectories."""
-    count = 0
-    for log_path in config.selected_logs:
-        if log_path.startswith(dir_path):
-            count += 1
-    return count
-
-
-def count_total_logs_in_dir(config: LogConfig, dir_path: str) -> int:
-    """Count total logs in a directory and its subdirectories."""
-    count = 0
-    for log in config.discovered_logs:
-        if log.get('exists', True) is False:
-            continue
-
-        path = log.get('path', '')
-        if path and path.startswith(dir_path):
-            count += 1
-    return count
-
-
-def select_all_in_directory(config: LogConfig, dir_path: str) -> None:
-    """Select all logs in a directory and its subdirectories."""
-    for log in config.discovered_logs:
-        if log.get('exists', True) is False:
-            continue
-
-        path = log.get('path', '')
-        if path and path.startswith(dir_path):
-            config.selected_logs.add(path)
-
-
-def deselect_all_in_directory(config: LogConfig, dir_path: str) -> None:
-    """Deselect all logs in a directory and its subdirectories."""
-    to_remove = set()
-    for log_path in config.selected_logs:
-        if log_path.startswith(dir_path):
-            to_remove.add(log_path)
-
-    config.selected_logs -= to_remove
+    if config.root_node:
+        process_node(config.root_node)
 
 
 def generate_config(config: LogConfig) -> Dict:
     """Generate configuration based on selections."""
+    # Get selected log paths from tree
+    selected_paths = []
+    if config.root_node:
+        selected_paths = config.root_node.get_selected_paths()
+
     # Basic configuration
     output_config = {
         'loki_url': config.loki_url,
@@ -578,7 +327,6 @@ def generate_config(config: LogConfig) -> Dict:
         output_config['include_services'] = list(config.selected_services)
 
     # Add specifically selected log paths (patterns)
-    selected_paths = list(config.selected_logs)
     if selected_paths:
         # Convert exact paths to patterns
         include_patterns = []
@@ -688,33 +436,507 @@ def save_config(config: Dict, file_path: str) -> bool:
             yaml.safe_dump(config, f, default_flow_style=False)
         return True
     except Exception as e:
-        print(f"Error saving configuration: {str(e)}", file=sys.stderr)
         return False
 
 
-def print_config_summary(config_data: Dict, selected_logs: int, total_logs: int) -> None:
-    """Print a summary of the generated configuration."""
-    print("\n==== Configuration Summary ====")
-    print(f"Selected logs: {selected_logs}/{total_logs}")
+def get_flat_tree(root: TreeNode) -> List[TreeNode]:
+    """Get a flattened list of tree nodes for display."""
+    nodes = []
 
-    if 'include_types' in config_data:
-        print(f"Log types: {', '.join(config_data['include_types'])}")
+    def traverse(node: TreeNode, level: int = 0):
+        nodes.append((node, level))
+        if node.type == TYPE_DIR and node.is_expanded:
+            for child in sorted(node.children, key=lambda x: (x.type != TYPE_DIR, x.name)):
+                traverse(child, level + 1)
 
-    if 'include_services' in config_data:
-        print(f"Services: {', '.join(config_data['include_services'])}")
+    traverse(root)
+    return nodes
 
-    print(f"Loki URL: {config_data['loki_url']}")
-    print(f"Promtail port: {config_data['promtail_port']}")
-    print(f"Container engine: {config_data['docker_command']}")
 
-    print(f"\nConfiguration saved to: {args.output}")
-    print("Use 'logbuddy start' to apply this configuration and start monitoring.")
+def initialize_curses():
+    """Initialize curses environment."""
+    # Set up terminal
+    screen = curses.initscr()
+    curses.start_color()
+    curses.use_default_colors()
+    curses.cbreak()
+    curses.noecho()
+    screen.keypad(True)
+    curses.curs_set(0)  # Hide cursor
+
+    # Initialize color pairs
+    curses.init_pair(COLOR_NORMAL, curses.COLOR_WHITE, -1)
+    curses.init_pair(COLOR_SELECTED, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    curses.init_pair(COLOR_ENABLED, curses.COLOR_GREEN, -1)
+    curses.init_pair(COLOR_DISABLED, curses.COLOR_RED, -1)
+    curses.init_pair(COLOR_TITLE, curses.COLOR_CYAN, -1)
+    curses.init_pair(COLOR_STATUS, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    curses.init_pair(COLOR_HELP, curses.COLOR_YELLOW, -1)
+
+    # Store screen dimensions
+    max_y, max_x = screen.getmaxyx()
+    curses_state['screen'] = screen
+    curses_state['max_y'] = max_y
+    curses_state['max_x'] = max_x
+
+    return screen
+
+
+def cleanup_curses():
+    """Clean up curses environment."""
+    if curses_state['screen']:
+        curses_state['screen'].keypad(False)
+        curses.nocbreak()
+        curses.echo()
+        curses.endwin()
+
+
+def signal_handler(sig, frame):
+    """Handle signals to clean up curses before exiting."""
+    cleanup_curses()
+    sys.exit(0)
+
+
+def draw_screen(config: LogConfig):
+    """Draw the main screen."""
+    screen = curses_state['screen']
+    max_y, max_x = screen.getmaxyx()
+    curses_state['max_y'] = max_y
+    curses_state['max_x'] = max_x
+
+    # Clear screen
+    screen.clear()
+
+    # Draw title bar
+    screen.attron(curses.color_pair(COLOR_TITLE) | curses.A_BOLD)
+    title = "LogBuddy - Promtail Configuration Generator"
+    screen.addstr(0, (max_x - len(title)) // 2, title)
+    screen.attroff(curses.color_pair(COLOR_TITLE) | curses.A_BOLD)
+
+    # Draw horizontal line
+    screen.addstr(1, 0, "=" * max_x)
+
+    # Calculate tree view area
+    tree_start_y = 2
+    tree_end_y = max_y - 3  # Leave space for status bar and help line
+    tree_height = tree_end_y - tree_start_y
+
+    # Get flattened tree
+    if config.root_node:
+        flat_tree = get_flat_tree(config.root_node)
+        config.visible_nodes = flat_tree
+
+        # Adjust view if current node is not visible
+        current_idx = -1
+        for i, (node, _) in enumerate(flat_tree):
+            if node == config.current_node:
+                current_idx = i
+                break
+
+        # If current node exists and is not in view, adjust top_node_idx
+        if current_idx != -1:
+            if current_idx < config.top_node_idx:
+                config.top_node_idx = current_idx
+            elif current_idx >= config.top_node_idx + tree_height:
+                config.top_node_idx = max(0, current_idx - tree_height + 1)
+
+        # Draw visible part of tree
+        for i in range(tree_height):
+            idx = config.top_node_idx + i
+            if idx < len(flat_tree):
+                node, level = flat_tree[idx]
+                draw_tree_node(screen, tree_start_y + i, node, level, node == config.current_node)
+
+    # Draw status bar
+    draw_status_bar(screen, max_y - 2, config)
+
+    # Draw help line
+    help_text = "↑/↓: Navigate | →/←/SPACE: Expand/Collapse | ENTER: Toggle | a: Select All | A: Deselect All | s: Save | q: Exit | h: Help"
+    screen.addstr(max_y - 1, 0, help_text[:max_x - 1], curses.color_pair(COLOR_HELP))
+
+    # Show help if requested
+    if config.show_help:
+        draw_help_window(screen, config)
+
+    # Refresh screen
+    screen.refresh()
+
+
+def draw_tree_node(screen, y: int, node: TreeNode, level: int, is_current: bool):
+    """Draw a single tree node."""
+    max_y, max_x = curses_state['max_y'], curses_state['max_x']
+    if y < 0 or y >= max_y:
+        return
+
+    # Calculate indent based on level
+    indent = level * 2
+    max_text_width = max_x - indent - 10  # Leave space for indicators
+
+    # Prepare indicators
+    if node.type == TYPE_DIR:
+        expand_indicator = INDICATOR_EXPANDED if node.is_expanded else INDICATOR_COLLAPSED
+    else:
+        expand_indicator = " "
+
+    select_indicator = INDICATOR_ENABLED if node.is_selected else INDICATOR_DISABLED
+
+    # Get node display name and info
+    if node.type == TYPE_FILE and node.log_data:
+        log_type = node.log_data.get('type', '')
+        service = node.log_data.get('labels', {}).get('service', '')
+
+        info = ""
+        if log_type:
+            info += f"type={log_type}"
+        if service:
+            info += f" service={service}" if info else f"service={service}"
+
+        if info:
+            info = f" ({info})"
+
+        # Truncate if too long
+        if len(node.name) + len(info) > max_text_width:
+            name_length = max_text_width - len(info) - 3
+            display_name = node.name[:name_length] + "..." + info
+        else:
+            display_name = node.name + info
+    else:
+        # For directories, add a count of selected/total
+        if node.type == TYPE_DIR:
+            selected = node.count_selected()
+            total = node.count_total()
+            ratio = f" [{selected}/{total}]"
+
+            # Truncate if too long
+            if len(node.name) + len(ratio) > max_text_width:
+                name_length = max_text_width - len(ratio) - 3
+                display_name = node.name[:name_length] + "..." + ratio
+            else:
+                display_name = node.name + ratio
+        else:
+            display_name = node.name
+
+    # Add trailing slash for directories
+    if node.type == TYPE_DIR:
+        display_name += "/"
+
+    # Construct the full line
+    line = " " * indent + expand_indicator + " " + select_indicator + " " + display_name
+
+    # Draw with appropriate attributes
+    if is_current:
+        attr = curses.color_pair(COLOR_SELECTED) | curses.A_BOLD
+    else:
+        attr = curses.color_pair(COLOR_NORMAL)
+
+    screen.addstr(y, 0, " " * max_x)  # Clear line
+    screen.addstr(y, 0, line[:max_x - 1], attr)
+
+    # Draw selection indicator with color
+    indicator_pos = indent + 2
+    if indicator_pos < max_x:
+        screen.addstr(y, indicator_pos, select_indicator,
+                      curses.color_pair(COLOR_ENABLED if node.is_selected else COLOR_DISABLED) |
+                      (curses.A_BOLD if is_current else 0))
+
+
+def draw_status_bar(screen, y: int, config: LogConfig):
+    """Draw the status bar."""
+    max_y, max_x = curses_state['max_y'], curses_state['max_x']
+    if y < 0 or y >= max_y:
+        return
+
+    # Calculate statistics
+    if config.root_node:
+        selected = config.root_node.count_selected()
+        total = config.root_node.count_total()
+        ratio = f"{selected}/{total}"
+    else:
+        ratio = "0/0"
+
+    # Prepare status message
+    status = f" Selected: {ratio} logs | Types: {len(config.selected_types)} | Services: {len(config.selected_services)}"
+
+    # Add custom message if present
+    if config.status_message:
+        status += f" | {config.status_message}"
+
+    # Draw status bar
+    screen.addstr(y, 0, " " * max_x, curses.color_pair(COLOR_STATUS))
+    screen.addstr(y, 0, status[:max_x - 1], curses.color_pair(COLOR_STATUS))
+
+
+def draw_help_window(screen, config: LogConfig):
+    """Draw a help window overlay."""
+    max_y, max_x = curses_state['max_y'], curses_state['max_x']
+
+    # Calculate window dimensions
+    help_height = 14
+    help_width = 60
+    help_y = (max_y - help_height) // 2
+    help_x = (max_x - help_width) // 2
+
+    # Create a sub-window
+    if help_y > 0 and help_x > 0 and help_y + help_height < max_y and help_x + help_width < max_x:
+        help_win = curses.newwin(help_height, help_width, help_y, help_x)
+        help_win.box()
+
+        # Draw title
+        help_win.addstr(0, (help_width - 4) // 2, "HELP", curses.A_BOLD)
+
+        # Draw help content
+        help_lines = [
+            "Arrow Keys: Navigate through the tree",
+            "SPACE: Expand/collapse directory",
+            "→/←: Expand/collapse or move right/left",
+            "ENTER: Toggle current item selection",
+            "a: Select all items",
+            "A: Deselect all items",
+            "s: Save configuration and exit",
+            "q: Exit (will prompt to save changes)",
+            "h: Toggle this help window",
+            "",
+            "Green ● indicates selected logs",
+            "Red ● indicates unselected logs",
+            ""
+        ]
+
+        for i, line in enumerate(help_lines, 1):
+            if i < help_height - 1:
+                help_win.addstr(i, 2, line[:help_width - 4])
+
+        # Draw close instruction
+        help_win.addstr(help_height - 2, 2, "Press any key to close this window", curses.A_BOLD)
+
+        help_win.refresh()
+
+
+def draw_confirmation_dialog(screen, message: str, yes_action, no_action):
+    """Draw a confirmation dialog."""
+    max_y, max_x = curses_state['max_y'], curses_state['max_x']
+
+    # Calculate window dimensions
+    dialog_height = 5
+    dialog_width = len(message) + 10
+    dialog_y = (max_y - dialog_height) // 2
+    dialog_x = (max_x - dialog_width) // 2
+
+    # Create a sub-window
+    if dialog_y > 0 and dialog_x > 0 and dialog_width > 20:
+        dialog_win = curses.newwin(dialog_height, dialog_width, dialog_y, dialog_x)
+        dialog_win.box()
+
+        # Draw title
+        dialog_win.addstr(0, (dialog_width - 12) // 2, "Confirmation", curses.A_BOLD)
+
+        # Draw message
+        dialog_win.addstr(2, 5, message[:dialog_width - 10])
+
+        # Draw buttons
+        dialog_win.addstr(3, 5, "[Y]es", curses.A_BOLD)
+        dialog_win.addstr(3, dialog_width - 10, "[N]o", curses.A_BOLD)
+
+        dialog_win.refresh()
+
+        # Wait for response
+        while True:
+            key = screen.getch()
+            if key in [ord('y'), ord('Y')]:
+                yes_action()
+                break
+            elif key in [ord('n'), ord('N')]:
+                no_action()
+                break
+
+
+def navigation_loop(config: LogConfig):
+    """Main navigation loop."""
+    screen = curses_state['screen']
+
+    # Initialize navigation
+    if config.root_node and not config.current_node:
+        config.current_node = config.root_node
+
+    # Draw initial screen
+    draw_screen(config)
+
+    # Main loop
+    while not config.exit_requested:
+        # Get user input
+        key = screen.getch()
+
+        # Process navigation or toggle
+        if key == curses.KEY_UP:
+            # Move up
+            if config.visible_nodes:
+                current_idx = -1
+                for i, (node, _) in enumerate(config.visible_nodes):
+                    if node == config.current_node:
+                        current_idx = i
+                        break
+
+                if current_idx > 0:
+                    config.current_node = config.visible_nodes[current_idx - 1][0]
+
+        elif key == curses.KEY_DOWN:
+            # Move down
+            if config.visible_nodes:
+                current_idx = -1
+                for i, (node, _) in enumerate(config.visible_nodes):
+                    if node == config.current_node:
+                        current_idx = i
+                        break
+
+                if current_idx < len(config.visible_nodes) - 1:
+                    config.current_node = config.visible_nodes[current_idx + 1][0]
+
+        elif key == curses.KEY_RIGHT or key == ord(' '):
+            # Expand directory or move right
+            if config.current_node and config.current_node.type == TYPE_DIR:
+                if not config.current_node.is_expanded:
+                    config.current_node.is_expanded = True
+                    config.modified = True
+                elif config.current_node.children:
+                    # Move to first child
+                    config.current_node = config.current_node.children[0]
+
+        elif key == curses.KEY_LEFT:
+            # Collapse directory or move to parent
+            if config.current_node:
+                if config.current_node.type == TYPE_DIR and config.current_node.is_expanded:
+                    config.current_node.is_expanded = False
+                    config.modified = True
+                elif config.current_node.parent:
+                    config.current_node = config.current_node.parent
+
+        elif key == curses.KEY_ENTER or key == 10 or key == 13:
+            # Toggle selection
+            if config.current_node:
+                config.current_node.toggle_selected()
+                config.modified = True
+
+        elif key == ord('a'):
+            # Toggle all on
+            if config.root_node:
+                config.root_node.select_all(True)
+                config.modified = True
+                config.status_message = "Selected all items"
+
+        elif key == ord('A'):
+            # Toggle all off
+            if config.root_node:
+                config.root_node.select_all(False)
+                config.modified = True
+                config.status_message = "Deselected all items"
+
+        elif key == ord('s'):
+            # Save and exit
+            config.save_requested = True
+            config.exit_requested = True
+            config.status_message = "Saving configuration..."
+
+        elif key == ord('q'):
+            # Exit with confirmation if modified
+            if config.modified:
+                draw_confirmation_dialog(
+                    screen,
+                    "Save changes before exiting?",
+                    lambda: setattr(config, 'save_requested', True) or setattr(config, 'exit_requested', True),
+                    lambda: setattr(config, 'exit_requested', True)
+                )
+            else:
+                config.exit_requested = True
+
+        elif key == ord('h'):
+            # Toggle help
+            config.show_help = not config.show_help
+
+        # Handle help window navigation
+        elif config.show_help:
+            # Any key closes help
+            config.show_help = False
+
+        # Redraw screen
+        draw_screen(config)
+
+
+def non_interactive_config(config: LogConfig, args):
+    """Generate configuration without interactive UI."""
+    # Parse type and service includes
+    if args.include_types:
+        config.selected_types = set(t.strip() for t in args.include_types.split(','))
+
+    if args.include_services:
+        config.selected_services = set(s.strip() for s in args.include_services.split(','))
+
+    # Auto-select if specified
+    if args.auto_select:
+        auto_select_logs(args.auto_select, config)
+    elif not config.selected_types and not config.selected_services and not config.include_patterns:
+        # If nothing specified, use recommended settings
+        print("No selection criteria specified. Using recommended settings.")
+        auto_select_logs('recommended', config)
+
+    # Mark logs based on types and services
+    mark_logs_by_type_service(config)
+
+    # Generate and save configuration
+    output_config = generate_config(config)
+
+    if save_config(output_config, args.output):
+        print(f"Configuration saved to {args.output}")
+        return True
+    else:
+        print("Failed to save configuration", file=sys.stderr)
+        return False
+
+
+def interactive_config(config: LogConfig, args):
+    """Run interactive configuration with curses UI."""
+    # Install signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Initialize curses
+    screen = initialize_curses()
+
+    try:
+        # Run navigation loop
+        navigation_loop(config)
+
+        # Clean up curses
+        cleanup_curses()
+
+        # Save configuration if requested
+        if config.save_requested:
+            output_config = generate_config(config)
+            if save_config(output_config, args.output):
+                print(f"Configuration saved to {args.output}")
+                return True
+            else:
+                print(f"Error: Failed to save configuration to {args.output}", file=sys.stderr)
+                return False
+
+        return True
+
+    except Exception as e:
+        # Clean up curses on exception
+        cleanup_curses()
+        print(f"Error: {str(e)}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def print_help():
+    """Print help information."""
+    print(__doc__)
 
 
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="LogBuddy - CLI Promtail Configuration Generator",
+        description="LogBuddy - Promtail Configuration Generator",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
@@ -732,31 +954,28 @@ def parse_args():
                         help="Include specific path patterns (comma-separated)")
     parser.add_argument("--exclude-paths", "-e",
                         help="Exclude specific path patterns (comma-separated)")
-    parser.add_argument("--loki-url", "-l", default=DEFAULT_LOKI_URL,
-                        help=f"Loki URL (default: {DEFAULT_LOKI_URL})")
-    parser.add_argument("--promtail-port", "-P", type=int, default=DEFAULT_PROMTAIL_PORT,
-                        help=f"Promtail port (default: {DEFAULT_PROMTAIL_PORT})")
-    parser.add_argument("--container-engine", "-c", choices=["docker", "podman"],
-                        default=DEFAULT_CONTAINER_ENGINE,
-                        help=f"Container engine (default: {DEFAULT_CONTAINER_ENGINE})")
-    parser.add_argument("--no-interactive", "-n", action="store_true",
-                        help="Disable interactive mode (use auto-select or manual options)")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Verbose output")
+    parser.add_argument("--non-interactive", "-n", action="store_true",
+                        help="Run in non-interactive mode")
+    parser.add_argument("--help", action="store_true",
+                        help="Show help message and exit")
 
-    return parser.parse_args()
+    # Parse known args to allow for logbuddy's additional args
+    args, _ = parser.parse_known_args()
+
+    # Show help and exit if requested
+    if args.help:
+        print_help()
+        sys.exit(0)
+
+    return args
 
 
 def main():
     """Main entry point."""
-    global args
     args = parse_args()
 
     # Initialize configuration
     config = LogConfig()
-    config.loki_url = args.loki_url
-    config.promtail_port = args.promtail_port
-    config.container_engine = args.container_engine
 
     # Parse include/exclude patterns
     if args.include_paths:
@@ -779,63 +998,18 @@ def main():
     # Extract metadata
     extract_log_metadata(config.discovered_logs, config)
 
-    # Build directory tree
-    config.log_tree = build_directory_tree(config.discovered_logs)
+    # Build tree structure
+    config.root_node = build_tree_structure(config.discovered_logs)
 
-    # Handle log selection
-    if not args.no_interactive and not args.auto_select and not args.include_types and not args.include_services:
-        # Interactive tree-based mode
-        interactive_tree_selection(config)
+    # Run in requested mode
+    success = False
+    if args.non_interactive:
+        success = non_interactive_config(config, args)
     else:
-        # Non-interactive mode
-        # Parse type and service includes
-        if args.include_types:
-            config.selected_types = set(t.strip() for t in args.include_types.split(','))
+        success = interactive_config(config, args)
 
-        if args.include_services:
-            config.selected_services = set(s.strip() for s in args.include_services.split(','))
-
-        # Auto-select if specified
-        if args.auto_select:
-            auto_select_logs(args.auto_select, config)
-        elif not config.selected_types and not config.selected_services and not config.include_patterns:
-            # If nothing specified, use recommended settings
-            print("No selection criteria specified. Using recommended settings.")
-            auto_select_logs('recommended', config)
-
-        # Select logs based on types and services if no specific paths were provided
-        if not config.include_patterns:
-            for log in config.discovered_logs:
-                if log.get('exists', True) is False:
-                    continue
-
-                path = log.get('path', '')
-                if not path:
-                    continue
-
-                log_type = log.get('type', '')
-                service = log.get('labels', {}).get('service', '')
-
-                if (log_type in config.selected_types or
-                        service in config.selected_services):
-                    config.selected_logs.add(path)
-
-    # Generate and save configuration
-    output_config = generate_config(config)
-
-    if save_config(output_config, args.output):
-        print(f"Configuration saved to {args.output}")
-
-        # Print summary
-        if args.verbose:
-            print_config_summary(
-                output_config,
-                len(config.selected_logs),
-                len(config.discovered_logs)
-            )
-    else:
-        print("Failed to save configuration", file=sys.stderr)
-        sys.exit(1)
+    # Exit with appropriate status
+    sys.exit(0 if success else 1)
 
 
 if __name__ == "__main__":

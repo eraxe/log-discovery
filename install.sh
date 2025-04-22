@@ -236,6 +236,14 @@ install_system() {
     log_info "Creating misc directory: ${INSTALL_DIR}/misc"
     mkdir -p "${INSTALL_DIR}/misc"
 
+    # Create core directory
+    log_info "Creating core directory: ${INSTALL_DIR}/core"
+    mkdir -p "${INSTALL_DIR}/core"
+
+    # Create ui directory
+    log_info "Creating ui directory: ${INSTALL_DIR}/ui"
+    mkdir -p "${INSTALL_DIR}/ui"
+
     # Copy main files
     log_info "Copying files..."
     cp "${SCRIPT_DIR}/log_discovery.py" "${INSTALL_DIR}/"
@@ -262,6 +270,30 @@ install_system() {
         if [ -f "$module_file" ]; then
             cp "$module_file" "${INSTALL_DIR}/modules/"
             log_info "Copied module: $(basename "$module_file")"
+        fi
+    done
+
+    # Copy core files
+    log_info "Copying core files..."
+    cp "${SCRIPT_DIR}/core/__init__.py" "${INSTALL_DIR}/core/" 2>/dev/null || touch "${INSTALL_DIR}/core/__init__.py"
+
+    # Copy all Python files in the core directory
+    for core_file in "${SCRIPT_DIR}/core"/*.py; do
+        if [ -f "$core_file" ]; then
+            cp "$core_file" "${INSTALL_DIR}/core/"
+            log_info "Copied core module: $(basename "$core_file")"
+        fi
+    done
+
+    # Copy ui files
+    log_info "Copying ui files..."
+    cp "${SCRIPT_DIR}/ui/__init__.py" "${INSTALL_DIR}/ui/" 2>/dev/null || touch "${INSTALL_DIR}/ui/__init__.py"
+
+    # Copy all Python files in the ui directory
+    for ui_file in "${SCRIPT_DIR}/ui"/*.py; do
+        if [ -f "$ui_file" ]; then
+            cp "$ui_file" "${INSTALL_DIR}/ui/"
+            log_info "Copied UI module: $(basename "$ui_file")"
         fi
     done
 
@@ -341,6 +373,9 @@ EOF
     echo "  logbuddy start        # Start monitoring"
     echo "  logbuddy stop         # Stop monitoring"
     echo "  logbuddy status       # Check monitoring status"
+    echo "  logbuddy quicksetup   # Perform a quick setup with automatic detection"
+    echo "  logbuddy doctor       # Check system health and fix common issues"
+    echo "  logbuddy setup        # Interactive setup wizard"
     echo ""
     if $SERVICE_ENABLED; then
         log_info "Or use the systemd service:"
@@ -591,6 +626,36 @@ update_system() {
         if [ -f "$module_file" ]; then
             cp "$module_file" "${INSTALL_DIR}/modules/"
             log_info "Updated module: $(basename "$module_file")"
+        fi
+    done
+
+    # Create core directory if it doesn't exist
+    log_info "Updating core directory..."
+    mkdir -p "${INSTALL_DIR}/core"
+
+    # Copy core init file or create if missing
+    cp "${SCRIPT_DIR}/core/__init__.py" "${INSTALL_DIR}/core/" 2>/dev/null || touch "${INSTALL_DIR}/core/__init__.py"
+
+    # Copy all Python files in the core directory
+    for core_file in "${SCRIPT_DIR}/core"/*.py; do
+        if [ -f "$core_file" ]; then
+            cp "$core_file" "${INSTALL_DIR}/core/"
+            log_info "Updated core module: $(basename "$core_file")"
+        fi
+    done
+
+    # Create ui directory if it doesn't exist
+    log_info "Updating ui directory..."
+    mkdir -p "${INSTALL_DIR}/ui"
+
+    # Copy ui init file or create if missing
+    cp "${SCRIPT_DIR}/ui/__init__.py" "${INSTALL_DIR}/ui/" 2>/dev/null || touch "${INSTALL_DIR}/ui/__init__.py"
+
+    # Copy all Python files in the ui directory
+    for ui_file in "${SCRIPT_DIR}/ui"/*.py; do
+        if [ -f "$ui_file" ]; then
+            cp "$ui_file" "${INSTALL_DIR}/ui/"
+            log_info "Updated UI module: $(basename "$ui_file")"
         fi
     done
 

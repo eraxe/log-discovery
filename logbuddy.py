@@ -37,6 +37,12 @@ import configparser
 import getpass
 from datetime import datetime
 
+# Enhanced UI and workflow imports
+from ui.settings_tui import run_settings_tui
+from core.system_detect import detect_system_config
+from core.setup_wizard import run_enhanced_setup_wizard
+from core.workflow import quick_setup_command, doctor_command, setup_command
+
 # Constants
 INSTALL_DIR = "/opt/logbuddy"
 CONFIG_DIR = "/etc/logbuddy"
@@ -253,6 +259,17 @@ def discover_logs(args):
     """Discover logs on the system."""
     ensure_directories()
     settings = load_settings()
+
+    # If no specific types provided, attempt to detect them
+    if not args.include and not settings["discovery"]["include_types"]:
+        print("Detecting installed software for log discovery...")
+        detected = detect_system_config()
+        if detected["log_types_found"]:
+            print(f"Detected log types: {', '.join(detected['log_types_found'])}")
+            if input("Include only detected log types? [Y/n]: ").strip().lower() != 'n':
+                settings["discovery"]["include_types"] = detected["log_types_found"]
+                save_settings(settings)
+                args.include = ','.join(detected["log_types_found"])
 
     # Legacy mode: use runner.sh if needed
     if args.legacy:
@@ -647,15 +664,14 @@ def handle_settings(args):
     """View or modify settings."""
     settings = load_settings()
 
-    # Print current settings
+    # If no arguments, run the TUI
     if not hasattr(args, 'action') or not args.action:
-        print("Current settings:")
-        print(json.dumps(settings, indent=2))
-        print("\nUse 'logbuddy settings set <section> <key> <value>' to modify a setting")
-        print("Use 'logbuddy settings reset' to reset to defaults")
+        # Run the interactive settings TUI
+        if run_settings_tui():
+            print("Settings saved successfully.")
         return
 
-    # Handle settings actions
+    # Handle command-line settings actions - original code follows
     if args.action == "set":
         if not all([args.section, args.key, args.value]):
             print("Error: section, key, and value are required")
@@ -756,176 +772,8 @@ def handle_settings(args):
             print(f"Error exporting settings: {e}")
 
 
-def run_setup_wizard():
-    """Run the interactive setup wizard."""
-    settings = load_settings()
-
-    print("\n=== LogBuddy Setup Wizard ===\n")
-    print("This wizard will help you set up LogBuddy for your system.")
-    print("You can re-run this wizard at any time with 'logbuddy init'.")
-
-    # Step 1: Configure monitoring backend
-    print("\n=== Step 1: Monitoring Backend ===")
-    print("LogBuddy can use different backends for log monitoring.")
-    print("Currently available:")
-    print("  1) Loki/Promtail - Grafana's log aggregation solution")
-    print("  2) None - Discovery only, no monitoring")
-
-    backend_choice = input("Choose a backend [1]: ").strip() or "1"
-
-    if backend_choice == "1":
-        settings["monitoring"]["backend"] = "loki-promtail"
-
-        # Container engine
-        print("\nWhich container engine would you like to use?")
-        print("  1) Podman (default, more secure)")
-        print("  2) Docker")
-
-        engine_choice = input("Choose a container engine [1]: ").strip() or "1"
-        settings["monitoring"]["container_engine"] = "podman" if engine_choice == "1" else "docker"
-
-        # Container names
-        default_promtail = settings["monitoring"]["promtail_container"]
-        default_loki = settings["monitoring"]["loki_container"]
-
-        settings["monitoring"]["promtail_container"] = input(
-            f"Promtail container name [{default_promtail}]: ").strip() or default_promtail
-        settings["monitoring"]["loki_container"] = input(
-            f"Loki container name [{default_loki}]: ").strip() or default_loki
-
-        # Port
-        default_port = settings["monitoring"]["port"]
-        port_input = input(f"Loki port [{default_port}]: ").strip() or str(default_port)
-        settings["monitoring"]["port"] = int(port_input)
-
-        # Credentials
-        default_username = settings["monitoring"]["credentials"]["username"]
-        settings["monitoring"]["credentials"]["username"] = input(
-            f"Admin username [{default_username}]: ").strip() or default_username
-
-        if not settings["monitoring"]["credentials"]["password"]:
-            settings["monitoring"]["credentials"]["password"] = generate_password()
-            print(f"Generated password: {settings['monitoring']['credentials']['password']}")
-            print("You can change this later if needed.")
-
-        # Auto-start
-        auto_start = input("Automatically start monitoring after setup? [Y/n]: ").strip().lower() != "n"
-        settings["monitoring"]["auto_start"] = auto_start
-
-    elif backend_choice == "2":
-        settings["monitoring"]["backend"] = "none"
-        print("No monitoring backend selected. LogBuddy will only perform log discovery.")
-
-    # Step 2: Discovery settings
-    print("\n=== Step 2: Log Discovery Settings ===")
-
-    # Discovery interval
-    print("How often should LogBuddy discover logs?")
-    print("  1) Daily (default)")
-    print("  2) Hourly")
-    print("  3) Weekly")
-    print("  4) Manual only")
-
-    interval_choice = input("Choose an interval [1]: ").strip() or "1"
-
-    if interval_choice == "1":
-        settings["discovery"]["interval"] = "daily"
-    elif interval_choice == "2":
-        settings["discovery"]["interval"] = "hourly"
-    elif interval_choice == "3":
-        settings["discovery"]["interval"] = "weekly"
-    elif interval_choice == "4":
-        settings["discovery"]["interval"] = "manual"
-
-    # Step 3: User interface preferences
-    print("\n=== Step 3: User Interface Preferences ===")
-
-    # Tree view
-    print("The log selection tree view allows you to manually select which logs to monitor.")
-    print("Would you like to:")
-    print("  1) Use the tree view for initial configuration (recommended)")
-    print("  2) Skip the tree view and use recommended settings")
-
-    tree_choice = input("Choose an option [1]: ").strip() or "1"
-    settings["ui"]["skip_tree_view"] = tree_choice == "2"
-
-    if tree_choice == "2":
-        settings["ui"]["auto_select_recommended"] = True
-        print("LogBuddy will automatically select recommended logs for monitoring.")
-
-    # Step 4: Notification settings
-    print("\n=== Step 4: Notification Settings ===")
-
-    # Email notifications
-    email_notify = input("Would you like to receive email notifications? [y/N]: ").strip().lower() == "y"
-
-    if email_notify:
-        email = input("Enter your email address: ").strip()
-        settings["output"]["notify_email"] = email
-        print(f"Email notifications will be sent to {email}")
-
-    # Save settings
-    settings["system"]["first_run"] = False
-    settings["system"]["setup_completed"] = True
-    save_settings(settings)
-
-    print("\n=== Setup Complete! ===")
-    print("Your LogBuddy configuration has been saved.")
-
-    # Run discovery
-    print("\nRunning initial log discovery...")
-    try:
-        discover_logs(argparse.Namespace(
-            verbose=True,
-            format="json",
-            include=None,
-            exclude=None,
-            validate=True,
-            legacy=False,
-            output=DISCOVERY_OUTPUT,
-            timeout=None
-        ))
-    except:
-        print("Warning: Initial log discovery failed. You can run it manually with 'logbuddy discover'.")
-
-    # Configure logs
-    if not settings["ui"]["skip_tree_view"]:
-        print("\nNow let's configure which logs to monitor.")
-        input("Press Enter to continue to the configuration screen...")
-
-        try:
-            configure_logs(argparse.Namespace(force_tree_view=True))
-        except:
-            print("Warning: Log configuration failed. You can run it manually with 'logbuddy config'.")
-    else:
-        # Auto-configure
-        configure_logs(argparse.Namespace(force_tree_view=False))
-
-    # Install and start monitoring
-    if settings["monitoring"]["backend"] != "none":
-        print("\nWould you like to install the monitoring backend now?")
-        install_now = input("Install now? [Y/n]: ").strip().lower() != "n"
-
-        if install_now:
-            try:
-                install_monitoring(argparse.Namespace(backend=settings["monitoring"]["backend"]))
-
-                if settings["monitoring"]["auto_start"]:
-                    print("\nStarting monitoring...")
-                    start_monitoring(argparse.Namespace())
-            except:
-                print("Warning: Monitoring installation failed. You can install it manually with 'logbuddy install'.")
-
-    print("\nSetup is complete! You can now use LogBuddy with the following commands:")
-    print("  logbuddy discover     # Discover logs on the system")
-    print("  logbuddy config       # Configure which logs to monitor")
-    print("  logbuddy start        # Start monitoring")
-    print("  logbuddy status       # Check monitoring status")
-    print("  logbuddy settings     # View or modify settings")
-
-
 def init_command(args):
-    """Run the initial setup wizard."""
+    """Run the enhanced setup wizard."""
     # Check if setup has already been completed
     settings = load_settings()
 
@@ -934,8 +782,8 @@ def init_command(args):
         print("Use 'logbuddy init --force' to run the setup wizard again.")
         return
 
-    # Run the setup wizard
-    run_setup_wizard()
+    # Run the enhanced setup wizard
+    run_enhanced_setup_wizard(INSTALL_DIR, CONFIG_DIR, DATA_DIR)
 
 
 def main():
@@ -1016,6 +864,18 @@ def main():
     settings_parser.add_argument("value", nargs="?", help="New value (for set)")
     settings_parser.add_argument("--file", "-f", help="File path (for import/export)")
     settings_parser.set_defaults(func=handle_settings)
+
+    # Add new workflow commands
+    quicksetup_parser = subparsers.add_parser("quicksetup", help="Quick setup with recommended settings")
+    quicksetup_parser.set_defaults(func=quick_setup_command)
+
+    doctor_parser = subparsers.add_parser("doctor", help="Check system configuration and fix common issues")
+    doctor_parser.set_defaults(func=doctor_command)
+
+    setup_parser = subparsers.add_parser("setup", help="Interactive setup process")
+    setup_parser.add_argument("--force", "-f", action="store_true", help="Force setup even if already configured")
+    setup_parser.add_argument("--interactive", "-i", action="store_true", help="Force interactive configuration")
+    setup_parser.set_defaults(func=setup_command)
 
     # Parse arguments
     args = parser.parse_args()

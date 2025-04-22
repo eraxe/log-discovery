@@ -11,7 +11,9 @@ This module contains enhancements for the main logbuddy.py workflow including:
 import os
 import sys
 import json
+import glob
 import yaml
+import socket
 import subprocess
 import shutil
 import time
@@ -19,9 +21,8 @@ from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple, Union
 from datetime import datetime
 
-# Add project root to path for imports
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from core.system_detect import detect_system_config
+# Import from same directory since we're in core/
+from .system_detect import detect_system_config
 
 # Make sure these match the constants in logbuddy.py
 INSTALL_DIR = "/opt/logbuddy"
@@ -682,13 +683,11 @@ def doctor_command(args):
                 print("- Reinstall LogBuddy using the installer script")
             if not os.path.exists(DEFAULT_CONFIG):
                 print("- Run 'logbuddy init' to set up configuration")
-            if settings["monitoring"]["backend"] == "loki-promtail" and not shutil.which(
-                    settings["monitoring"]["container_engine"]):
+            if settings["monitoring"]["backend"] == "loki-promtail" and not shutil.which(settings["monitoring"]["container_engine"]):
                 print(f"- Install {settings['monitoring']['container_engine']} or change container engine")
             if not os.path.exists(DISCOVERY_OUTPUT):
                 print("- Run 'logbuddy discover' to find logs")
-            if not os.path.exists(f"{CONFIG_DIR}/promtail-config.yaml") and settings["monitoring"][
-                "backend"] == "loki-promtail":
+            if not os.path.exists(f"{CONFIG_DIR}/promtail-config.yaml") and settings["monitoring"]["backend"] == "loki-promtail":
                 print("- Run 'logbuddy update' to generate Promtail configuration")
 
 
@@ -712,8 +711,8 @@ def setup_command(args):
             print("Setup canceled.")
             return
 
-    # Run the enhanced setup wizard
-    from settings_tui import run_settings_tui
+    # Run the settings TUI
+    from ui.settings_tui import run_settings_tui
     settings_saved = run_settings_tui()
 
     if settings_saved:
@@ -809,15 +808,98 @@ def setup_command(args):
 
 
 def check_system():
-    """Perform a system check and suggest improvements."""
-    # This function would check for:
-    # 1. LogBuddy installation status
-    # 2. Dependencies
-    # 3. Container engine status
-    # 4. Monitoring status
-    # 5. Log discovery status
-    # 6. Configuration status
-    pass
+    """Perform a system check and suggest improvements.
+
+    This function checks various aspects of the LogBuddy installation and configuration:
+    1. LogBuddy installation status
+    2. Dependencies
+    3. Container engine status
+    4. Monitoring status
+    5. Log discovery status
+    6. Configuration status
+
+    It can be called programmatically by other functions in LogBuddy.
+    For an interactive version, use the doctor_command() function.
+
+    Returns:
+        dict: A dictionary with check results
+    """
+    results = {
+        "installation": {"status": "unknown", "issues": []},
+        "dependencies": {"status": "unknown", "issues": []},
+        "containers": {"status": "unknown", "issues": []},
+        "monitoring": {"status": "unknown", "issues": []},
+        "discovery": {"status": "unknown", "issues": []},
+        "configuration": {"status": "unknown", "issues": []}
+    }
+
+    settings = load_settings()
+
+    # Check 1: Installation
+    if not os.path.exists(INSTALL_DIR):
+        results["installation"]["status"] = "failed"
+        results["installation"]["issues"].append("Installation directory not found")
+    else:
+        # Check for key files
+        missing_files = []
+        for file in ["log_discovery.py", "log_source.py", "runner.sh"]:
+            if not os.path.exists(f"{INSTALL_DIR}/{file}"):
+                missing_files.append(file)
+
+        if missing_files:
+            results["installation"]["status"] = "incomplete"
+            results["installation"]["issues"].append(f"Missing files: {', '.join(missing_files)}")
+        else:
+            results["installation"]["status"] = "ok"
+
+    # Check 2: Settings file
+    if not os.path.exists(DEFAULT_CONFIG):
+        results["configuration"]["status"] = "missing"
+        results["configuration"]["issues"].append("Settings file not found")
+    else:
+        results["configuration"]["status"] = "ok"
+
+    # Check 3: Container engine
+    if settings["monitoring"]["backend"] == "loki-promtail":
+        engine = settings["monitoring"]["container_engine"]
+        if not shutil.which(engine):
+            results["dependencies"]["status"] = "missing"
+            results["dependencies"]["issues"].append(f"Container engine '{engine}' not found")
+        else:
+            results["dependencies"]["status"] = "ok"
+
+    # Check 4: Discovery results
+    if not os.path.exists(DISCOVERY_OUTPUT):
+        results["discovery"]["status"] = "missing"
+        results["discovery"]["issues"].append("No log discovery results found")
+    else:
+        try:
+            with open(DISCOVERY_OUTPUT, 'r') as f:
+                discovery_data = json.load(f)
+
+            if "sources" not in discovery_data or not discovery_data.get("sources"):
+                results["discovery"]["status"] = "empty"
+                results["discovery"]["issues"].append("Log discovery results are empty")
+            else:
+                results["discovery"]["status"] = "ok"
+                results["discovery"]["count"] = len(discovery_data.get("sources", []))
+        except Exception as e:
+            results["discovery"]["status"] = "error"
+            results["discovery"]["issues"].append(f"Error reading discovery results: {str(e)}")
+
+    # Check 5: Promtail configuration
+    if settings["monitoring"]["backend"] == "loki-promtail":
+        if not os.path.exists(f"{CONFIG_DIR}/promtail-config.yaml"):
+            results["monitoring"]["status"] = "unconfigured"
+            results["monitoring"]["issues"].append("Promtail configuration not found")
+        else:
+            results["monitoring"]["status"] = "configured"
+
+    # Overall status
+    overall_status = all(check["status"] in ["ok", "configured"] for check in results.values())
+    results["overall"] = "ok" if overall_status else "issues"
+
+    return results
 
 
 # Define the new commands to add to logbuddy.py
@@ -842,21 +924,6 @@ NEW_COMMANDS = [
         ]
     }
 ]
-
-# Here's how to add the new commands to the main parser in logbuddy.py:
-"""
-# Add new workflow commands
-quicksetup_parser = subparsers.add_parser("quicksetup", help="Quick setup with recommended settings")
-quicksetup_parser.set_defaults(func=quick_setup_command)
-
-doctor_parser = subparsers.add_parser("doctor", help="Check system configuration and fix common issues")
-doctor_parser.set_defaults(func=doctor_command)
-
-setup_parser = subparsers.add_parser("setup", help="Interactive setup process")
-setup_parser.add_argument("--force", "-f", action="store_true", help="Force setup even if already configured")
-setup_parser.add_argument("--interactive", "-i", action="store_true", help="Force interactive configuration")
-setup_parser.set_defaults(func=setup_command)
-"""
 
 if __name__ == "__main__":
     # This file is not meant to be run directly

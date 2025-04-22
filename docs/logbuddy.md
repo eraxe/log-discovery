@@ -161,7 +161,7 @@ Once connected, you can create dashboards to visualize your logs.
 ├── bridges/              # Integration bridges
 │   ├── podman.sh         # Podman integration
 │   ├── promtail.py       # Promtail config generator
-│   └── promtail-conf-gen.py # Interactive config UI
+│   └── promtail_conf_gen.py # Interactive config UI
 └── misc/                 # Miscellaneous utilities
     └── podman-loki-promtail.sh # Loki/Promtail setup
 

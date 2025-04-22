@@ -125,7 +125,7 @@ def configure_logs(args):
         sys.exit(1)
 
     # Build command
-    cmd = [f"{INSTALL_DIR}/bridges/promtail-conf-gen.py", "--input", DISCOVERY_OUTPUT, "--output", PROMTAIL_SETTINGS]
+    cmd = [f"{INSTALL_DIR}/bridges/promtail_conf_gen.py", "--input", DISCOVERY_OUTPUT, "--output", PROMTAIL_SETTINGS]
 
     # Run the configuration generator
     try:

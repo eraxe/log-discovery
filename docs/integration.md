@@ -16,7 +16,7 @@ LogBuddy integrates several components to create a unified log management soluti
    - `logbuddy.py`: Main entry point with unified command structure
 
 3. **Configuration Management**
-   - `bridges/promtail-conf-gen.py`: Interactive TUI for configuring which logs to monitor
+   - `bridges/promtail_conf_gen.py`: Interactive TUI for configuring which logs to monitor
    - `bridges/promtail.py`: Generator for Promtail configuration
 
 4. **Monitoring Integration**
@@ -39,7 +39,7 @@ Here's how data flows through the system:
 
 2. Configuration Process:
    ```
-   logbuddy config → promtail-conf-gen.py → promtail-config-settings.yaml
+   logbuddy config → promtail_conf_gen.py → promtail-config-settings.yaml
    logbuddy update → promtail.py → promtail-config.yaml
    ```
 
@@ -64,7 +64,7 @@ The log discovery process is the foundation of LogBuddy:
 
 The configuration process allows the user to select which logs to monitor:
 
-- `promtail-conf-gen.py` provides an interactive terminal UI
+- `promtail_conf_gen.py` provides an interactive terminal UI
 - It reads the `discovered_logs.json` file and presents logs in different views:
   - Directory tree view
   - By log type
@@ -112,7 +112,7 @@ The `logbuddy` command ties everything together:
    - Outputs results to `discovered_logs.json`
 
 2. `logbuddy config`:
-   - Launches `promtail-conf-gen.py` for interactive configuration
+   - Launches `promtail_conf_gen.py` for interactive configuration
    - Saves settings to `promtail-config-settings.yaml`
    - Calls `promtail.py` to generate `promtail-config.yaml`
 
@@ -162,7 +162,7 @@ def get_log_source():
 
 The Promtail configuration can be extended by:
 
-1. Modifying `promtail-conf-gen.py` to add new configuration options
+1. Modifying `promtail_conf_gen.py` to add new configuration options
 2. Updating `promtail.py` to use these options in the generated configuration
 
 ### Adding New Commands

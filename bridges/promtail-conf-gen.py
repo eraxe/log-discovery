@@ -96,8 +96,12 @@ class TreeNode:
             self.is_expanded = not self.is_expanded
 
     def toggle_selected(self):
-        """Toggle selected state."""
+        """Toggle selected state and propagate to children if this is a directory."""
         self.is_selected = not self.is_selected
+
+        # If this is a directory, propagate the selection state to all children
+        if self.type == TYPE_DIR:
+            self.select_all(self.is_selected)
 
     def select_all(self, value: bool = True):
         """Select or deselect this node and all children."""
@@ -424,6 +428,102 @@ def save_config(config: Dict, file_path: str) -> bool:
             yaml.safe_dump(config, f, default_flow_style=False)
         return True
     except Exception as e:
+        return False
+
+
+def save_tree_state(root_node, file_path):
+    """Save the expand/collapse and selection state of the tree to a file.
+
+    Args:
+        root_node: The root TreeNode
+        file_path: Path to save the state
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        # Create a dictionary to hold the state
+        state = {}
+
+        # Recursive function to capture state
+        def capture_state(node, path=""):
+            # Skip the root node in the path
+            node_path = path + "/" + node.name if path else node.name
+
+            # Store state for this node
+            state[node_path] = {
+                "expanded": node.is_expanded,
+                "selected": node.is_selected,
+                "type": node.type
+            }
+
+            # Process children
+            for child in node.children:
+                capture_state(child, node_path)
+
+        # Capture the state
+        capture_state(root_node)
+
+        # Save to file
+        with open(file_path, 'w') as f:
+            json.dump(state, f, indent=2)
+
+        return True
+    except Exception as e:
+        print(f"Error saving tree state: {str(e)}")
+        return False
+
+
+def load_tree_state(root_node, file_path):
+    """Load the expand/collapse and selection state of the tree from a file.
+
+    Args:
+        root_node: The root TreeNode
+        file_path: Path to load the state from
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not os.path.exists(file_path):
+        return False
+
+    try:
+        # Load the state
+        with open(file_path, 'r') as f:
+            state = json.load(f)
+
+        # Function to find a node by path
+        def find_node(node, path_parts):
+            if not path_parts:
+                return node
+
+            next_part = path_parts[0]
+            rest_parts = path_parts[1:]
+
+            for child in node.children:
+                if child.name == next_part:
+                    return find_node(child, rest_parts)
+
+            return None
+
+        # Apply state to nodes
+        for node_path, node_state in state.items():
+            path_parts = node_path.split("/")
+
+            # Skip empty parts
+            path_parts = [p for p in path_parts if p]
+
+            # Find the node
+            node = find_node(root_node, path_parts)
+
+            # Apply state if node found
+            if node:
+                node.is_expanded = node_state.get("expanded", False)
+                node.is_selected = node_state.get("selected", False)
+
+        return True
+    except Exception as e:
+        print(f"Error loading tree state: {str(e)}")
         return False
 
 
@@ -897,6 +997,12 @@ def interactive_config(config: LogConfig, args):
 
         # Save configuration if requested
         if config.save_requested:
+            # Save the tree state
+            state_file = os.path.join(os.path.dirname(args.output), "promtail_tree_state.json")
+            if save_tree_state(config.root_node, state_file):
+                print(f"Tree state saved to {state_file}")
+
+            # Generate and save the configuration
             output_config = generate_config(config)
             if save_config(output_config, args.output):
                 print(f"Configuration saved to {args.output}")
@@ -986,6 +1092,12 @@ def main():
 
     # Build tree structure
     config.root_node = build_tree_structure(config.discovered_logs)
+
+    # Load saved tree state if available
+    state_file = os.path.join(os.path.dirname(args.output), "promtail_tree_state.json")
+    if os.path.exists(state_file):
+        print(f"Loading saved tree state from {state_file}...")
+        load_tree_state(config.root_node, state_file)
 
     # Run in requested mode
     success = False

@@ -11,7 +11,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DISCOVERY_SCRIPT="${SCRIPT_DIR}/log_discovery.py"
+DISCOVERY_SCRIPT="${SCRIPT_DIR}/../log_discovery.py"
 CONFIG_GENERATOR="${SCRIPT_DIR}/promtail_config_generator.py"
 OUTPUT_DIR="${SCRIPT_DIR}/output"
 CONFIG_DIR="${SCRIPT_DIR}/config"

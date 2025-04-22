@@ -7,7 +7,7 @@ configuration for Loki log aggregation. It provides filtering capabilities
 based on a configuration file to include/exclude specific log types.
 
 Usage:
-    ./promtail_config_generator.py --input /path/to/discovered_logs.json
+    ./promtail_conf_gen.py --input /path/to/discovered_logs.json
                                    --output /path/to/promtail-config.yaml
                                    --config /path/to/config.yaml
                                    [--docker-update]

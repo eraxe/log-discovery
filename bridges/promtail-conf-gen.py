@@ -5,18 +5,6 @@ LogBuddy - Promtail Configuration Generator
 A curses-based tool for generating Promtail configurations based on discovered logs.
 Features a navigable tree interface for toggling directories and files on/off.
 
-Usage:
-    logbuddy config [options]
-
-Options:
-    --input FILE      Input JSON file from log discovery
-    --output FILE     Output YAML file for configuration
-    --auto-select     Auto-select logs (all, none, recommended)
-    --include-types   Include specific log types (comma-separated)
-    --include-services Include specific services (comma-separated)
-    --non-interactive Run in non-interactive mode
-    --help            Show this help message
-
 Navigation:
     ↑/↓               Move up/down in the tree
     →/←               Expand/collapse directory or move right/left
@@ -928,15 +916,21 @@ def interactive_config(config: LogConfig, args):
         return False
 
 
-def print_help():
-    """Print help information."""
-    print(__doc__)
-
-
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="LogBuddy - Promtail Configuration Generator",
+        description="""LogBuddy - Promtail Configuration Generator
+
+A curses-based tool for generating Promtail configurations based on discovered logs.
+Features a navigable tree interface for toggling directories and files on/off.
+
+This tool helps you configure which logs to monitor with Promtail/Loki by providing
+an interactive tree-based interface where you can navigate through the log files
+and select which ones to include in your monitoring configuration.
+
+The configuration is saved to a YAML file that can be used by Promtail to set up
+log scraping rules for your system.
+""",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
@@ -956,22 +950,14 @@ def parse_args():
                         help="Exclude specific path patterns (comma-separated)")
     parser.add_argument("--non-interactive", "-n", action="store_true",
                         help="Run in non-interactive mode")
-    parser.add_argument("--help", action="store_true",
-                        help="Show help message and exit")
 
     # Parse known args to allow for logbuddy's additional args
-    args, _ = parser.parse_known_args()
-
-    # Show help and exit if requested
-    if args.help:
-        print_help()
-        sys.exit(0)
-
-    return args
+    return parser.parse_known_args()[0]
 
 
 def main():
     """Main entry point."""
+    # Parse command line arguments
     args = parse_args()
 
     # Initialize configuration
